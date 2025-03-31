@@ -12,6 +12,7 @@ try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    from flashinfer import gen_single_decode_with_kv_cache
 
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -75,7 +76,8 @@ class FlashInferBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        #return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        return (num_blocks, 2, num_kv_heads, block_size, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -197,7 +199,7 @@ class FlashInferState(AttentionState):
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), "NHD")
+                self._get_workspace_buffer(), "HND")
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self):
@@ -210,7 +212,7 @@ class FlashInferState(AttentionState):
                 num_qo_heads // num_kv_heads > 4)
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
-                "NHD",
+                "HND",
                 use_tensor_cores=use_tensor_cores)
         return self._decode_wrapper
 
@@ -271,7 +273,7 @@ class FlashInferState(AttentionState):
         self._graph_decode_wrapper = \
             CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
             self._graph_decode_workspace_buffer, _indptr_buffer,
-            self._graph_indices_buffer, _last_page_len_buffer, "NHD",
+            self._graph_indices_buffer, _last_page_len_buffer, "HND",
             use_tensor_cores)
         if self.runner.kv_cache_dtype.startswith("fp8"):
             kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
@@ -304,6 +306,7 @@ class FlashInferState(AttentionState):
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             max_prefill_seq_len=0,
+            seq_lens_tensor=self._graph_seq_lens,
             block_tables=self._graph_block_tables,
             paged_kv_indptr=paged_kv_indptr_tensor_host,
             paged_kv_indices=paged_kv_indices_tensor_host,
@@ -329,6 +332,8 @@ class FlashInferState(AttentionState):
                                 attn_metadata,
                                 is_encoder_decoder_model: bool = False):
         return {
+            "block_tables": attn_metadata.block_tables,
+            "seq_lens_tensor": attn_metadata.seq_lens_tensor,
             "slot_mapping": attn_metadata.slot_mapping,
         }
 
@@ -966,6 +971,7 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                False,
             )
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache when the kv_cache_dtype is fp8
@@ -1041,12 +1047,24 @@ class FlashInferImpl(AttentionImpl):
                 logits_soft_cap or 0.0)
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
 
-            decode_output = decode_meta.decode_wrapper.run(
-                decode_query,
-                kv_cache,
-                k_scale=layer._k_scale_float,
-                v_scale=layer._v_scale_float,
-            )
+            workspace_buffer = decode_meta.decode_wrapper._int_workspace_buffer
+            xqa_block_tables = torch.stack((torch.mul(attn_metadata.block_tables,2) , torch.mul(attn_metadata.block_tables,2) +1),dim=1)
+#            cum_seq_lens = torch.cat((torch.tensor([0]).to(decode_query.device), torch.cumsum(attn_metadata.seq_lens_tensor, dim=0))).to(dtype=torch.int).to(decode_query.device)
+            cum_seq_lens = attn_metadata.seq_lens_tensor
+
+            decode_output = gen_single_decode_with_kv_cache(
+                decode_query, kv_cache, workspace_buffer, num_heads,
+                num_kv_heads, float(1.0 / (head_size**0.5)),
+                xqa_block_tables, cum_seq_lens, 16,#block_size,
+                attn_metadata.num_decode_tokens,
+                kv_cache_dtype, layer._k_scale_float,
+                layer._v_scale_float)
+#            decode_output = decode_meta.decode_wrapper.run(
+#                decode_query,
+#                kv_cache,
+#                k_scale=layer._k_scale_float,
+#                v_scale=layer._v_scale_float,
+#            )
 
         if prefill_output is None and decode_output is not None:
             # Decode only batch.
