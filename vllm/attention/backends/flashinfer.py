@@ -306,6 +306,7 @@ class FlashInferState(AttentionState):
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             max_prefill_seq_len=0,
+            max_decode_seq_len=0,
             seq_lens_tensor=self._graph_seq_lens,
             block_tables=self._graph_block_tables,
             paged_kv_indptr=paged_kv_indptr_tensor_host,
@@ -366,6 +367,9 @@ class FlashInferMetadata(AttentionMetadata):
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
     max_prefill_seq_len: int
+    # Maximum sequence length among decode batch. 0 if there are prefill
+    # requests only.
+    max_decode_seq_len: int
     # Number of query tokens for each request in the batch.
     # Currently, we require that all requests have the same number of query
     # tokens during the decoding phase. When speculavie decoding is enabled,
@@ -600,6 +604,7 @@ class FlashInferMetadata(AttentionMetadata):
             paged_kv_indptr=self.paged_kv_indptr,
             paged_kv_last_page_len=self.paged_kv_last_page_len,
             block_table_bound=self.block_table_bound)
+        self.max_decode_seq_len += 1
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -768,6 +773,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         use_captured_graph = cuda_graph_pad_size != -1
 
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
+        max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
         decode_query_len = max(query_lens[self.num_prefills:], default=1)
 
@@ -873,6 +879,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             max_prefill_seq_len=max_prefill_seq_len,
+            max_decode_seq_len=max_decode_seq_len,
             block_tables=block_tables,
             paged_kv_indptr=paged_kv_indptr_tensor,
             paged_kv_indices=paged_kv_indices_tensor,
@@ -1049,14 +1056,17 @@ class FlashInferImpl(AttentionImpl):
 
             workspace_buffer = decode_meta.decode_wrapper._int_workspace_buffer
             xqa_block_tables = torch.stack((torch.mul(attn_metadata.block_tables,2) , torch.mul(attn_metadata.block_tables,2) +1),dim=1)
-#            cum_seq_lens = torch.cat((torch.tensor([0]).to(decode_query.device), torch.cumsum(attn_metadata.seq_lens_tensor, dim=0))).to(dtype=torch.int).to(decode_query.device)
-            cum_seq_lens = attn_metadata.seq_lens_tensor
+            cum_seq_lens = torch.cat((torch.tensor([0]).to(decode_query.device), torch.cumsum(attn_metadata.seq_lens_tensor, dim=0))).to(dtype=torch.int).to(decode_query.device)
+#            cum_seq_lens = attn_metadata.seq_lens_tensor
 
             decode_output = gen_single_decode_with_kv_cache(
                 decode_query, kv_cache, workspace_buffer, num_heads,
-                num_kv_heads, float(1.0 / (head_size**0.5)),
+                num_kv_heads,
+                softmax_scale,
+                #float(1.0 / (head_size**0.5)),
                 xqa_block_tables, cum_seq_lens, 16,#block_size,
-                attn_metadata.num_decode_tokens,
+#                attn_metadata.max_decode_seq_len,
+                max(attn_metadata.seq_lens_tensor),
                 kv_cache_dtype, layer._k_scale_float,
                 layer._v_scale_float)
 #            decode_output = decode_meta.decode_wrapper.run(
