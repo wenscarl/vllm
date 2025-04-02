@@ -49,10 +49,10 @@ def run_vllm(
     sampling_params: list[SamplingParams] = []
     for request in requests:
         prompts.append(
-            TokensPrompt(prompt_token_ids=request.prompt["prompt_token_ids"],
-                       multi_modal_data=request.multi_modal_data)
-            if "prompt_token_ids" in request.prompt else \
-            TextPrompt(prompt=request.prompt,
+            TokensPrompt(prompt_token_ids=requests[0].prompt["prompt_token_ids"],
+                       multi_modal_data=requests[0].multi_modal_data)
+            if "prompt_token_ids" in requests[0].prompt else \
+            TextPrompt(prompt=requests[0].prompt,
                        multi_modal_data=request.multi_modal_data))
         sampling_params.append(
             SamplingParams(
