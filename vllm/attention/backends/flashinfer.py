@@ -1055,39 +1055,27 @@ class FlashInferImpl(AttentionImpl):
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
 
             workspace_buffer = decode_meta.decode_wrapper._int_workspace_buffer
-            xqa_block_tables = torch.stack((torch.mul(attn_metadata.block_tables,2) , torch.mul(attn_metadata.block_tables,2) +1),dim=1).contiguous()
-            cum_seq_lens = torch.cat((torch.tensor([0]).to(decode_query.device), torch.cumsum(attn_metadata.seq_lens_tensor.contiguous(), dim=0))).to(dtype=torch.int).to(decode_query.device).contiguous()
+            stacked_block_tables = torch.stack((torch.mul(attn_metadata.block_tables,2) , torch.mul(attn_metadata.block_tables,2) +1),dim=1).contiguous()
 
-#            print(f"softmax_scale={softmax_scale}")
-#            print(f"self compute: {float(1.0 / (head_size**0.5))}")
-#            print(f"k_scale:{layer._k_scale_float}")
-#            print(f"v_scale:{layer._v_scale_float}")
-#            print(f"max_decode_seq_len:{attn_metadata.max_decode_seq_len}")
-#            print(f"cum_seq_lens:{cum_seq_lens}")
-#            print(f"xqa_block_tables:{xqa_block_tables}")
-            #pdb.set_trace()
 #            decode_output = decode_meta.decode_wrapper.run(
 #                decode_query,
 #                kv_cache,
 #                k_scale=layer._k_scale_float,
 #                v_scale=layer._v_scale_float,
 #            )
-            #pdb.set_trace()
             decode_output = gen_single_decode_with_kv_cache(
-                decode_query.contiguous(), kv_cache.contiguous(), workspace_buffer,
+                decode_query,
+                kv_cache,
+                workspace_buffer,
                 num_heads,
                 num_kv_heads,
                 softmax_scale,
-                xqa_block_tables, cum_seq_lens, attn_metadata.page_size,
-                256*16,
-#                attn_metadata.max_decode_seq_len,
-#                max(attn_metadata.seq_lens_tensor),
+                stacked_block_tables,
+                decode_meta.seq_start_loc,
+                attn_metadata.page_size,
+                attn_metadata.max_decode_seq_len,
                 kv_cache_dtype, layer._k_scale_float,
                 layer._v_scale_float)
-#            pdb.set_trace()
-#            print(f"decode_output1:{decode_output1}")
-#            print(f"decode_output:{decode_output}")
-#            decode_output = decode_output1
 
 
         if prefill_output is None and decode_output is not None:

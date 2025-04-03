@@ -49,10 +49,10 @@ def run_vllm(
     sampling_params: list[SamplingParams] = []
     for request in requests:
         prompts.append(
-            TokensPrompt(prompt_token_ids=requests[0].prompt["prompt_token_ids"],
-                       multi_modal_data=requests[0].multi_modal_data)
-            if "prompt_token_ids" in requests[0].prompt else \
-            TextPrompt(prompt=requests[0].prompt,
+            TokensPrompt(prompt_token_ids=request.prompt["prompt_token_ids"],
+                       multi_modal_data=request.multi_modal_data)
+            if "prompt_token_ids" in request.prompt else \
+            TextPrompt(prompt=request.prompt,
                        multi_modal_data=request.multi_modal_data))
         sampling_params.append(
             SamplingParams(
@@ -76,7 +76,7 @@ def run_vllm(
                                sampling_params,
                                lora_request=lora_requests,
                                use_tqdm=True)
-        print(outputs[0])
+        print(outputs)
         end = time.perf_counter()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
