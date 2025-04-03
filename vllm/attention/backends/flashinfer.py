@@ -227,6 +227,9 @@ class FlashInferState(AttentionState):
         self._graph_seq_lens = torch.ones(max_batch_size,
                                           dtype=torch.int32,
                                           device=self.runner.device)
+        self._graph_seq_start_loc = torch.zeros(max_batch_size + 1,
+                                                dtype=torch.int32,
+                                                device=self.runner.device)
         self._graph_block_tables = torch.from_numpy(
             self.runner.graph_block_tables).to(device=self.runner.device)
         self._graph_decode_workspace_buffer = self._get_workspace_buffer()
@@ -243,6 +246,7 @@ class FlashInferState(AttentionState):
         self._is_graph_capturing = False
         del self._graph_slot_mapping
         del self._graph_seq_lens
+        del self._graph_seq_start_loc
         del self._graph_block_tables
         del self._graph_decode_workspace_buffer
         del self._graph_indices_buffer
@@ -316,7 +320,7 @@ class FlashInferState(AttentionState):
             num_kv_heads=num_kv_heads,
             head_dim=self.runner.model_config.get_head_size(),
             page_size=self.runner.block_size,
-            seq_start_loc=None,
+            seq_start_loc=self._graph_seq_start_loc,
             query_start_loc=query_start_loc_host,
             device=self.runner.device,
             data_type=kv_cache_dtype,
@@ -335,6 +339,7 @@ class FlashInferState(AttentionState):
         return {
             "block_tables": attn_metadata.block_tables,
             "seq_lens_tensor": attn_metadata.seq_lens_tensor,
+            "seq_start_loc": attn_metadata.seq_start_loc,
             "slot_mapping": attn_metadata.slot_mapping,
         }
 
@@ -473,6 +478,7 @@ class FlashInferMetadata(AttentionMetadata):
                     self.device)
                 self.block_table_bound = self.block_table_bound.to(self.device)
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
+                self.seq_start_loc = self.seq_start_loc.to(self.device)
                 self.paged_kv_indices = self.paged_kv_indices.to(self.device)
                 self.prefill_wrapper.plan(
                     self.query_start_loc,
@@ -502,6 +508,9 @@ class FlashInferMetadata(AttentionMetadata):
                 self.block_table_bound = self.block_table_bound.to(self.device)
             if self.seq_lens_tensor is not None:
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
+            if self.seq_start_loc is not None:
+                self.seq_start_loc = self.seq_start_loc.to(self.device)
+
 
             assert self.decode_wrapper is not None
             self.decode_wrapper.plan(
@@ -1053,10 +1062,9 @@ class FlashInferImpl(AttentionImpl):
             assert decode_meta.decode_wrapper._logits_soft_cap == (
                 logits_soft_cap or 0.0)
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
-
-            workspace_buffer = decode_meta.decode_wrapper._int_workspace_buffer
+            
+            # TODO(shuw): Fuse into kernel.
             stacked_block_tables = torch.stack((torch.mul(attn_metadata.block_tables,2) , torch.mul(attn_metadata.block_tables,2) +1),dim=1).contiguous()
-
 #            decode_output = decode_meta.decode_wrapper.run(
 #                decode_query,
 #                kv_cache,
@@ -1066,15 +1074,16 @@ class FlashInferImpl(AttentionImpl):
             decode_output = gen_single_decode_with_kv_cache(
                 decode_query,
                 kv_cache,
-                workspace_buffer,
+                decode_meta.decode_wrapper._int_workspace_buffer,
                 num_heads,
                 num_kv_heads,
                 softmax_scale,
                 stacked_block_tables,
-                decode_meta.seq_start_loc,
+                attn_metadata.seq_start_loc,
                 attn_metadata.page_size,
                 attn_metadata.max_decode_seq_len,
-                kv_cache_dtype, layer._k_scale_float,
+                kv_cache_dtype,
+                layer._k_scale_float,
                 layer._v_scale_float)
 
 

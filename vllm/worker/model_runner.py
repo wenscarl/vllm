@@ -2032,6 +2032,8 @@ class CUDAGraphRunner(nn.Module):
                 attn_metadata.slot_mapping, non_blocking=True)
             self.input_buffers["seq_lens_tensor"].copy_(
                 attn_metadata.seq_lens_tensor, non_blocking=True)
+            self.input_buffers["seq_start_loc"].copy_(
+                attn_metadata.seq_start_loc, non_blocking=True)
             self.input_buffers["block_tables"].copy_(
                 attn_metadata.block_tables, non_blocking=True)
 
