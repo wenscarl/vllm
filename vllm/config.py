@@ -3633,7 +3633,7 @@ class VllmConfig:
                     not self.model_config.enforce_eager:
 
                 possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
-                possible_sizes = [32,]
+                possible_sizes = [4,]
                 # find the minimum size that is larger than max_num_seqs,
                 # which then becomes the max_batchsize_to_capture
                 larger_sizes = [
