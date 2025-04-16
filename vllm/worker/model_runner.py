@@ -2030,6 +2030,10 @@ class CUDAGraphRunner(nn.Module):
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(
                 attn_metadata.slot_mapping, non_blocking=True)
+            self.input_buffers["seq_lens_tensor"].copy_(
+                attn_metadata.seq_lens_tensor, non_blocking=True)
+            self.input_buffers["block_tables"].copy_(
+                attn_metadata.block_tables, non_blocking=True)            
 
         self.attn_state.prepare_graph_input_buffers(
             self.input_buffers, attn_metadata, self._is_encoder_decoder_model)
