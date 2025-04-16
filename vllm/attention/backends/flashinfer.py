@@ -1072,30 +1072,30 @@ class FlashInferImpl(AttentionImpl):
                 logits_soft_cap or 0.0)
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
 
-#            solver = os.environ.get('KERNEL', 'FI')
-#            if solver == 'FI':
-#                decode_output = decode_meta.decode_wrapper.run(
-#                    decode_query,
-#                    kv_cache.permute(*stride_order),
-#                    k_scale=layer._k_scale_float,
-#                    v_scale=layer._v_scale_float,
-#                )
-#            else:
-            workspace_buffer = decode_meta.decode_wrapper._int_workspace_buffer
-            stacked_block_tables = torch.stack((torch.mul(attn_metadata.block_tables,2) , torch.mul(attn_metadata.block_tables,2) +1),dim=1).contiguous()
-            decode_output = gen_single_decode_with_kv_cache(
-                decode_query,
-                kv_cache,
-                workspace_buffer,
-                num_heads,
-                num_kv_heads,
-                softmax_scale,
-                stacked_block_tables,
-                decode_meta.seq_lens_tensor,
-                attn_metadata.page_size,
-                attn_metadata.max_decode_seq_len,
-                kv_cache_dtype, layer._k_scale_float,
-                layer._v_scale_float)
+            solver = os.environ.get('KERNEL', 'FI')
+            if solver == 'FI':
+                decode_output = decode_meta.decode_wrapper.run(
+                    decode_query,
+                    kv_cache.permute(*stride_order),
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
+                )
+            else:
+                workspace_buffer = decode_meta.decode_wrapper._int_workspace_buffer
+                stacked_block_tables = torch.stack((torch.mul(attn_metadata.block_tables,2) , torch.mul(attn_metadata.block_tables,2) +1),dim=1).contiguous()
+                decode_output = gen_single_decode_with_kv_cache(
+                    decode_query,
+                    kv_cache,
+                    workspace_buffer,
+                    num_heads,
+                    num_kv_heads,
+                    softmax_scale,
+                    stacked_block_tables,
+                    decode_meta.seq_lens_tensor,
+                    attn_metadata.page_size,
+                    attn_metadata.max_decode_seq_len,
+                    kv_cache_dtype, layer._k_scale_float,
+                    layer._v_scale_float)
 
         if prefill_output is None and decode_output is not None:
             # Decode only batch.
