@@ -1084,7 +1084,6 @@ class FlashInferImpl(AttentionImpl):
                     decode_query,
                     kv_cache,
                     workspace_buffer,
-                    torch.zeros((4,),dtype=torch.int),
                     num_heads,
                     num_kv_heads,
                     softmax_scale,
