@@ -660,6 +660,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
+        ep_rank: Optional[int] = None,
+        ep_size: Optional[int] = None,
         activation: str = "silu",
     ):
         if self.use_marlin:
@@ -710,22 +712,63 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         # Cutlass moe takes in activations in BF16/Half precision
         # and fp4 quantized weights loaded from the checkpoint
-        return cutlass_moe_fp4(
-                a=x,
-                w1_fp4=layer.w13_weight,
-                w1_blockscale=layer.w13_blockscale_swizzled,
-                w1_alphas=layer.g1_alphas,
-                w2_fp4=layer.w2_weight,
-                w2_blockscale=layer.w2_blockscale_swizzled,
-                w2_alphas=layer.g2_alphas,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                m=x.shape[0],
-                n=layer.w2_weight.shape[2] * 2,
-                k=x.shape[1],
-                e=layer.w13_weight.shape[0],
-                a1_gscale=layer.w13_input_scale_quant,
-                a2_gscale=layer.w2_input_scale_quant,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                device=x.device).to(x.dtype)
+        out = torch.empty_like(x)
+        workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.int8).cuda()
+        # trtllm cutlass kernel only accept scalar global_scales
+        # since this is global_scale_inv, min instead of max
+        a1_gs = torch.min(layer.w13_input_scale_quant)
+        a2_gs = torch.min(layer.w2_input_scale_quant)
+        w1_blockscale=layer.w13_blockscale_swizzled
+        w2_blockscale=layer.w2_blockscale_swizzled
+        g1_alphas=layer.g1_alphas
+        g2_alphas=layer.g2_alphas
+
+        n2 = layer.w13_weight.shape[1]
+        nd2 = n2 // 2
+        w13_weight_flash = torch.cat((layer.w13_weight[:,nd2:,:], layer.w13_weight[:,:nd2,:]), dim=1).contiguous()
+        w1_blockscale_flash = torch.cat((w1_blockscale[:,nd2:,:], w1_blockscale[:,:nd2,:]), dim=1).contiguous()
+        quant_scales=[
+            a1_gs,
+            w1_blockscale_flash.view(torch.int32),
+            g1_alphas,
+            a2_gs,
+            w2_blockscale.view(torch.int32),
+            g2_alphas,
+
+        ]         
+        import flashinfer
+        import flashinfer.flashinfer_kernels_sm100
+        out=flashinfer.trtllm_fused_moe(
+            x.contiguous(),
+            out,
+            topk_ids.to(torch.int),
+            topk_weights,
+            w13_weight_flash.view(torch.long),
+            layer.w2_weight.view(torch.long),
+            workspace,
+            activation=3,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            quant_scales=quant_scales,
+            profile_ids=None,
+        )
+        return out
+#           return cutlass_moe_fp4(
+#                a=x,
+#                a1_gscale=layer.w13_input_scale_quant,
+#                a2_gscale=layer.w2_input_scale_quant,
+#                w1_fp4=layer.w13_weight,
+#                w1_blockscale=layer.w13_blockscale_swizzled,
+#                w1_alphas=layer.g1_alphas,
+#                w2_fp4=layer.w2_weight,
+#                w2_blockscale=layer.w2_blockscale_swizzled,
+#                w2_alphas=layer.g2_alphas,
+#                topk_weights=topk_weights,
+#                topk_ids=topk_ids,
+#                m=x.shape[0],
+#                n=layer.w2_weight.shape[2] * 2,
+#                k=x.shape[1],
+#                e=layer.w13_weight.shape[0],
+#                expert_map=expert_map,
+#                apply_router_weight_on_input=apply_router_weight_on_input,
+#                device=x.device).to(x.dtype)

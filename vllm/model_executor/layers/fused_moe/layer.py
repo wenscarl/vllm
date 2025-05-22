@@ -1339,6 +1339,8 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
+            ep_rank=self.ep_rank,
+            ep_size=self.ep_size,
         )
 
         if self.dp_size > 1:
