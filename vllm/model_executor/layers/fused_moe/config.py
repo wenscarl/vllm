@@ -15,6 +15,17 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
+from typing import TYPE_CHECKING
+
+try:
+    from flashinfer import fp4_quantize as fp4_quantize
+    from flashinfer.fused_moe import (
+        cutlass_fused_moe as flashinfer_cutlass_fused_moe)
+except ImportError:
+    if not TYPE_CHECKING:
+        flashinfer_cutlass_fused_moe = None
+has_flashinfer = flashinfer_cutlass_fused_moe is not None
+
 logger = init_logger(__name__)
 
 
@@ -136,6 +147,10 @@ class FusedMoEParallelConfig:
     def use_deepep_ll_kernels(self):
         return (self.use_all2all_kernels
                 and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
+
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        return envs.VLLM_USE_FLASHINFER_MOE and has_flashinfer
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int, world_size_: int,

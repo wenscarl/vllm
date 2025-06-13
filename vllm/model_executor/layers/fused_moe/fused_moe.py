@@ -18,8 +18,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 # yapf: enable
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    _valid_flashinfer_fused_moe, flashinfer_cutlass_fused_moe_nvfp4)
+# from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+#     _valid_flashinfer_fused_moe)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
@@ -1151,9 +1151,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None,
                   block_shape: Optional[list[int]] = None,
-                  allow_deep_gemm: bool = False,
-                  allow_flashinfer_cutlass: bool = False,
-                  extra_expert_args: Optional[Dict]=None) -> torch.Tensor:
+                  allow_deep_gemm: bool = False) -> torch.Tensor:
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
     N = w1.shape[1]
@@ -1169,48 +1167,48 @@ def fused_experts(hidden_states: torch.Tensor,
         #     'k': x.shape[1],
         #     'e': layer.w13_weight.shape[0],
         # }
-    if extra_expert_args is not None:
-        if extra_expert_args['use_cutlass_fp4']:
-            assert 'g1_alphas' in extra_expert_args
-            assert 'g2_alphas' in extra_expert_args
-            g1_alphas = extra_expert_args['g1_alphas']
-            g2_alphas = extra_expert_args['g2_alphas']
+    # if extra_expert_args is not None:
+    #     if extra_expert_args['use_cutlass_fp4']:
+    #         assert 'g1_alphas' in extra_expert_args
+    #         assert 'g2_alphas' in extra_expert_args
+    #         g1_alphas = extra_expert_args['g1_alphas']
+    #         g2_alphas = extra_expert_args['g2_alphas']
 
-            backend = extra_expert_args['backend']
-            if backend == 'CUTLASS':
-                # cutlass_moe_fp4()
-                pass
-            elif backend == 'FLASHINFER_CUTLASS':
-                ep_rank = extra_expert_args['ep_rank']
-                ep_size = extra_expert_args['ep_size']
-                tp_rank = extra_expert_args['tp_rank']
-                tp_size = extra_expert_args['tp_size']
-                use_dp = extra_expert_args['use_dp']
-                pdb.set_trace()
-                flashinfer_cutlass_fused_moe_nvfp4(
-                    hidden_states=hidden_states,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    w1=w1,
-                    w2=w2,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    g1_alphas=g1_alphas,
-                    g2_alphas=g2_alphas,
-                    inplace=inplace,
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    ep_rank=ep_rank,
-                    ep_size=ep_size,
-                    tp_rank=tp_rank,
-                    tp_size=tp_size,
-                    use_dp=use_dp,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-            )
-            else:
-                raise ValueError(f"Unsupported NVFP4 backend: {backend}")
+    #         backend = extra_expert_args['backend']
+    #         if backend == 'CUTLASS':
+    #             # cutlass_moe_fp4()
+    #             pass
+    #         elif backend == 'FLASHINFER_CUTLASS':
+    #             ep_rank = extra_expert_args['ep_rank']
+    #             ep_size = extra_expert_args['ep_size']
+    #             tp_rank = extra_expert_args['tp_rank']
+    #             tp_size = extra_expert_args['tp_size']
+    #             use_dp = extra_expert_args['use_dp']
+    #             pdb.set_trace()
+    #             flashinfer_cutlass_fused_moe_nvfp4(
+    #                 hidden_states=hidden_states,
+    #                 topk_weights=topk_weights,
+    #                 topk_ids=topk_ids,
+    #                 w1=w1,
+    #                 w2=w2,
+    #                 w1_scale=w1_scale,
+    #                 w2_scale=w2_scale,
+    #                 a1_scale=a1_scale,
+    #                 a2_scale=a2_scale,
+    #                 g1_alphas=g1_alphas,
+    #                 g2_alphas=g2_alphas,
+    #                 inplace=inplace,
+    #                 activation=activation,
+    #                 global_num_experts=global_num_experts,
+    #                 ep_rank=ep_rank,
+    #                 ep_size=ep_size,
+    #                 tp_rank=tp_rank,
+    #                 tp_size=tp_size,
+    #                 use_dp=use_dp,
+    #                 apply_router_weight_on_input=apply_router_weight_on_input,
+    #         )
+    #         else:
+    #             raise ValueError(f"Unsupported NVFP4 backend: {backend}")
 
     # if (allow_flashinfer_cutlass and use_nvfp4_w4a4
     #         and _valid_flashinfer_fused_moe(hidden_states, w1, w2)):

@@ -465,7 +465,6 @@ class FusedMoEModularKernel(torch.nn.Module):
          _expert_topk_weights) = self.prepare_finalize.prepare(
              a1, a1_scale, a2_scale, topk_weights, topk_ids,
              global_num_experts, expert_map, apply_router_weight_on_input,
-             apply_rounter_weight_on_input,
              **prepare_kwargs)
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
@@ -520,10 +519,11 @@ class FusedMoEModularKernel(torch.nn.Module):
                                      dtype=workspace_dtype)
             expert_kwargs = extra_expert_args or {}
             import pdb
-            pdb.set_trace()
+            # pdb.set_trace()
             if num_chunks == 1:
                 fused_out = _resize_cache(workspace13, fused_out_shape)
-
+                if 'topk_weights' in expert_kwargs:
+                    expert_kwargs['topk_weights'] = topk_weights
                 self.fused_experts.apply(
                     fused_out,
                     a1q,

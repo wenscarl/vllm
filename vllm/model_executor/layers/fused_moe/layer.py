@@ -58,7 +58,7 @@ if current_platform.is_cuda_alike():
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
     if has_flashinfer:
-        from .flashinfer_cutlass_prepare_finalize import FlashInferCutlassMoEPrepareAndFinalizeNoEP
+        from .flashinfer_cutlass_prepare_finalize import FlashInferCutlassMoEPrepareAndFinalize
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -89,6 +89,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     moe: FusedMoEConfig
 
+    def select_experts_impl(self, moe_parallel_config):
+        pass
+
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -99,18 +102,22 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                               quant_config: Optional[QuantizationConfig]):
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
-        import pdb
-        pdb.set_trace()
+        # import pdb
+        # pdb.set_trace()
         self.moe = moe
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
-        import pdb
-        pdb.set_trace()
+        # import pdb
+        # pdb.set_trace()
         if moe.use_flashinfer_cutlass_kernels:
-            prepare_finalize = FlashInferCutlassMoEPrepareAndFinalizeNoEP(
-                #TODO(shuw): leave a flashinfer 
-                quant_dtype=moe.quant_dtype,  #meaning 2x e2m1 packed in one
-                # TODO(shuw): uint8 for fp4
+            # print("yyy"*100)
+            # print(f"moe.quant_dtype:{moe.quant_config.quant_dtype}")
+            prepare_finalize = FlashInferCutlassMoEPrepareAndFinalize(
+                #TODO(shuw): leave a flashinfer, fix later
+                # need to pass from FusedMoEQuantConfig
+                quant_dtype=torch.uint8,
+                # quant_dtype=moe.quant_config.quant_dtype,  #meaning 2x e2m1 packed in one
+
             )
         if moe.use_pplx_kernels:
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
@@ -758,13 +765,16 @@ class FusedMoE(torch.nn.Module):
         )
         self.moe_config = moe
         self.quant_config = quant_config
-
+        import pdb
+        # pdb.set_trace()
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
-
+        
+        quant_method.select_experts_impl(self.moe_parallel_config)
+    
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
@@ -1413,10 +1423,10 @@ class FusedMoE(torch.nn.Module):
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
+                # ep_size=self.ep_size,
+                # ep_rank=self.ep_rank,
+                # tp_size=self.tp_size,
+                # tp_rank=self.tp_rank,
             )
 
             if not skip_result_store:
@@ -1482,10 +1492,10 @@ class FusedMoE(torch.nn.Module):
             expert_load_view=self.expert_load_view,
             logical_to_physical_map=self.logical_to_physical_map,
             logical_replica_count=self.logical_replica_count,
-            ep_rank=self.ep_rank,
-            ep_size=self.ep_size,
-            tp_size=self.tp_size,
-            tp_rank=self.tp_rank,
+            # ep_rank=self.ep_rank,
+            # ep_size=self.ep_size,
+            # tp_size=self.tp_size,
+            # tp_rank=self.tp_rank,
         )
 
         if do_naive_dispatch_combine:

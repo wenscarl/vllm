@@ -10,7 +10,8 @@ from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP)
 
 def get_local_sizes():
     cu_sizes = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
@@ -20,7 +21,7 @@ def get_local_sizes():
     return sizes
 
 
-class FlashInferCutlassMoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize
+class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
                                                  ):
 
     def __init__(
@@ -80,7 +81,13 @@ class FlashInferCutlassMoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize
             is_sf_swizzled_layout=
             not use_dp,  # Needs swizzling after communication
         )
+        # print(f"self.quant_dtype:{self.quant_dtype}")
         if use_dp:
+            # print(f"topk_weights:{topk_weights.shape}")
+            # print(f"topk_ids:{topk_ids.shape}")
+            # print(f"a1q:{a1q.shape}")
+            # print(f"a1q_scale:{a1q_scale.shape}")
+            # print(get_local_sizes())
             topk_weights, topk_ids, a1q, a1q_scale = \
                 get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale],
                                            dim=0,
