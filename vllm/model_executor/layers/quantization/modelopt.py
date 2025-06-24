@@ -478,7 +478,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             if not self.cutlass_nvfp4_supported:
                 logger.warning_once("Failed to import Flashinfer CUTLASS Fused MoE kernels.")
             elif (current_platform.is_cuda()
-                    and current_platform.has_device_capability(100)):
+                    and current_platform.has_device_capability(10, 0)):
                 logger.info_once("Using FlashInfer kernels for ModelOptNvFp4FusedMoE.")
                 self.allow_flashinfer_cutlass = True
             else:
@@ -736,9 +736,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         assert not apply_router_weight_on_input, (
             "Router weight on input is not "
             "supported for ModelOptNvFp4FusedMoE.")
-        # assert expert_map is None, ("Expert Parallelism / expert_map "
-        #                             "is currently not supported for "
-        #                             "ModelOptNvFp4FusedMoE.")
+        assert expert_map is None, ("Expert Parallelism / expert_map "
+                                    "is currently not supported for "
+                                    "ModelOptNvFp4FusedMoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,

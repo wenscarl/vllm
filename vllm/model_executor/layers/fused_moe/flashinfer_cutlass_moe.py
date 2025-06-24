@@ -73,7 +73,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def apply(
         self,
-        # output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -108,15 +107,15 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             w2_scale.view(torch.int32),
             g2_alphas,
         ]
-        # Flashinfer CUTLASS moe takes in activations in BF16/Half/nvfp4 precision
-        # print("calling flashinfer cutlass fused moe\n"*100)
+        # Flashinfer CUTLASS moe takes in activations in BF16/Half/nvfp4.
         return cutlass_fused_moe(
             hidden_states,
             topk_ids.to(torch.int),                                               
-            topk_weights,                                                                                              
-            w1.view(torch.long),                                                                         
-            w2.view(torch.long),                                                                          
-            out_dtype,                                                                  
+            topk_weights,                
+            # FlashInfer API requires weight to be long for nvfp4                                                                              
+            w1.view(torch.long),
+            w2.view(torch.long),
+            out_dtype,
             quant_scales=quant_scales,
             input_sf=input_sf,
             ep_size=ep_size,
@@ -155,9 +154,6 @@ class FlashInferCutlassKernels(mk.FusedMoEModularKernel):
         use_dp: bool=False,
         apply_router_weight_on_input: bool = False,
     ) -> torch.Tensor:
-        has_nvfp4 = False
-        if self.prepare_finalize.quant_dtype == torch.uint8:
-            has_nvfp4 = True
         a1 = hidden_states
         output = a1 if inplace else torch.zeros_like(a1)
         
@@ -171,7 +167,6 @@ class FlashInferCutlassKernels(mk.FusedMoEModularKernel):
 
         # TODO(shuw): no chunk atm
         fused_out = self.fused_experts.apply(
-            # fused_out,
             a1q,
             w1,
             w2,
