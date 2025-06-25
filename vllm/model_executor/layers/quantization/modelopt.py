@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, Union
 import functools
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+
 import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
@@ -11,6 +12,7 @@ import vllm.envs as envs
 from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -28,15 +30,13 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
-from typing import TYPE_CHECKING
 try:
-    from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
     from flashinfer import fp4_quantize as fp4_quantize
+    from flashinfer.fused_moe import (
+        cutlass_fused_moe as flashinfer_cutlass_fused_moe)
 except ImportError:
     if not TYPE_CHECKING:
         flashinfer_cutlass_fused_moe = None
@@ -476,14 +476,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         if envs.VLLM_USE_FLASHINFER_MOE:
             if not self.cutlass_nvfp4_supported:
-                logger.warning_once("Failed to import Flashinfer CUTLASS Fused MoE kernels.")
+                logger.warning_once(
+                    "Failed to import Flashinfer CUTLASS Fused MoE kernels.")
             elif (current_platform.is_cuda()
-                    and current_platform.has_device_capability(10, 0)):
-                logger.info_once("Using FlashInfer kernels for ModelOptNvFp4FusedMoE.")
+                  and current_platform.has_device_capability(10, 0)):
+                logger.info_once(
+                    "Using FlashInfer kernels for ModelOptNvFp4FusedMoE.")
                 self.allow_flashinfer_cutlass = True
             else:
                 logger.warning_once(
-                    "Flashinfer CUTLASS Fused MoE not supported on the current platform.")
+                    "Flashinfer CUTLASS Fused MoE not supported on the current platform."
+                )
 
         if not self.cutlass_nvfp4_supported:
             if is_fp4_marlin_supported():
@@ -496,7 +499,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             fused_experts,
             # block_shape=self.quant_config.weight_block_size,
             allow_flashinfer_cutlass=self.allow_flashinfer_cutlass)
-    
+
     @property
     def load_up_proj_weight_first(self) -> bool:
         # FlashInfer CUTLASS kernel assumes [Up, Gate] Proj as W13
@@ -701,7 +704,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         ep_rank: Optional[int] = None,
         ep_size: Optional[int] = None,
         tp_rank: Optional[int] = None,
-        tp_size: Optional[int] = None,        
+        tp_size: Optional[int] = None,
     ):
         if self.use_marlin:
             topk_weights, topk_ids = FusedMoE.select_experts(
@@ -736,9 +739,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         assert not apply_router_weight_on_input, (
             "Router weight on input is not "
             "supported for ModelOptNvFp4FusedMoE.")
-        assert expert_map is None, ("Expert Parallelism / expert_map "
-                                    "is currently not supported for "
-                                    "ModelOptNvFp4FusedMoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -759,7 +759,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=False, # TODO(shuw): fix later, now output is high prec
+                inplace=False,  # TODO(shuw): fix later, now output is high prec
                 activation=activation,
                 global_num_experts=global_num_experts,
                 w1_scale=layer.w13_blockscale_swizzled,
@@ -773,13 +773,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 ep_size=ep_size,
                 tp_rank=tp_rank,
                 tp_size=tp_size,
-                use_dp=layer.dp_size>1,
+                use_dp=layer.dp_size > 1,
             )
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)
 
         # Cutlass moe takes in activations in BF16/Half precision
         # and fp4 quantized weights loaded from the checkpoint
+        assert expert_map is None, ("Expert Parallelism / expert_map "
+                            "is currently not supported for "
+                            "ModelOptNvFp4FusedMoE.")
+
         return cutlass_moe_fp4(a=x,
                                w1_fp4=layer.w13_weight,
                                w1_blockscale=layer.w13_blockscale_swizzled,

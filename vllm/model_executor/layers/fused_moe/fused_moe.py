@@ -1175,7 +1175,7 @@ def fused_experts(hidden_states: torch.Tensor,
     # permute/unpermute ops are available.
     N = w1.shape[1]
     if (allow_flashinfer_cutlass and use_nvfp4_w4a4
-        and _valid_flashinfer_fused_moe(hidden_states, w1, w2)):
+            and _valid_flashinfer_fused_moe(hidden_states, w1, w2)):
         return flashinfer_cutlass_fused_moe_nvfp4(
             hidden_states=hidden_states,
             topk_weights=topk_weights,

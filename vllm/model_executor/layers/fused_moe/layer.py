@@ -36,9 +36,11 @@ has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 has_deepep = importlib.util.find_spec("deep_ep") is not None
 
 from typing import TYPE_CHECKING
+
 try:
-    from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
     from flashinfer import fp4_quantize as fp4_quantize
+    from flashinfer.fused_moe import (
+        cutlass_fused_moe as flashinfer_cutlass_fused_moe)
 except ImportError:
     if not TYPE_CHECKING:
         flashinfer_cutlass_fused_moe = None
@@ -278,6 +280,7 @@ class MoEConfig:
     @property
     def use_flashinfer_cutlass_kernels(self):
         return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+
 
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
@@ -1103,8 +1106,10 @@ class FusedMoE(torch.nn.Module):
         # w3, up_proj: Load into second logical weight of w13.
         # trtllm cutlass kernel assumes differently
         assert shard_id in ("w1", "w3")
-        switch_w13 = getattr(self.quant_method, 'load_up_proj_weight_first', False)
-        if (switch_w13 and shard_id == "w1") or (not switch_w13 and shard_id == "w3"):
+        switch_w13 = getattr(self.quant_method, 'load_up_proj_weight_first',
+                             False)
+        if (switch_w13 and shard_id == "w1") or (not switch_w13
+                                                 and shard_id == "w3"):
             start = shard_size
         else:
             start = 0
@@ -1449,10 +1454,8 @@ class FusedMoE(torch.nn.Module):
         ctx = get_forward_context()
         #TODO(shuw):where is it?
         # flashinfer_cutlass_kernels can handle TP+EP without DP
-        max_tokens_across_dp = (
-            MOE_DP_CHUNK_SIZE if self.dp_size == 1 
-            else ctx.dp_metadata.max_tokens_across_dp_cpu
-        )
+        max_tokens_across_dp = (MOE_DP_CHUNK_SIZE if self.dp_size == 1 else
+                                ctx.dp_metadata.max_tokens_across_dp_cpu)
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
 
         num_tokens = full_hidden_states.size(0)
@@ -1506,7 +1509,7 @@ class FusedMoE(torch.nn.Module):
             ep_rank=self.ep_rank,
             ep_size=self.ep_size,
             tp_size=self.tp_size,
-            tp_rank=self.tp_rank,            
+            tp_rank=self.tp_rank,
         )
 
         if do_naive_dispatch_combine:

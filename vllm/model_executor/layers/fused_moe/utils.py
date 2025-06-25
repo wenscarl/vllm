@@ -4,6 +4,7 @@ from math import prod
 from typing import Optional
 
 import torch
+from flashinfer import fp4_quantize as fp4_quantize
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -11,7 +12,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.utils import cdiv
-from flashinfer import fp4_quantize as fp4_quantize
 
 
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
@@ -23,12 +23,16 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     ), f"{v} ({prod(v)}) <= {x.shape} ({x.numel()})"  # CUDAGRAPH unfriendly?
     return x.flatten()[:prod(v)].view(*v)
 
+
 def _fp4_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
     is_sf_swizzled_layout: bool,
 ) -> tuple[torch.Tensor]:
-    return fp4_quantize(A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout)
+    return fp4_quantize(A,
+                        A_scale,
+                        is_sf_swizzled_layout=is_sf_swizzled_layout)
+
 
 def _fp8_quantize(
     A: torch.Tensor,
@@ -91,10 +95,10 @@ def moe_kernel_quantize_input(
         return _fp8_quantize(A, A_scale, per_channel_quant, block_shape)
     elif qtype == torch.int8:
         return _int8_quantize(A, A_scale, per_channel_quant, block_shape)
-    elif qtype == torch.uint8: # nvfp4
-        return _fp4_quantize(
-            A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout
-        )    
+    elif qtype == torch.uint8:  # nvfp4
+        return _fp4_quantize(A,
+                             A_scale,
+                             is_sf_swizzled_layout=is_sf_swizzled_layout)
     else:
         assert A_scale is None
         return A, A_scale

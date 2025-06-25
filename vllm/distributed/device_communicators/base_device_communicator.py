@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from typing import Optional
+from typing import Optional, Union, List
 from weakref import WeakValueDictionary
 
 import torch
@@ -137,6 +137,12 @@ class DeviceCommunicatorBase:
                                                input_size[dim], ) +
                                               input_size[dim + 1:])
         return output_tensor
+
+    def all_gatherv(self,
+                    input_: Union[torch.Tensor, List[torch.Tensor]],
+                    dim: int = 0,
+                    sizes: Optional[List[int]] = None):
+        assert False, "not implemented"
 
     def reduce_scatter(self,
                        input_: torch.Tensor,

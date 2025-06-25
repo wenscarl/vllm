@@ -838,7 +838,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
 
-	# Allow use of FlashInfer CUTLASS kernels for fused moe ops.
+    # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE", "0"))),
 
