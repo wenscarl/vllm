@@ -3,55 +3,21 @@
 from typing import Optional
 
 import torch
+from flashinfer import fp4_swizzle_blockscale
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_dp_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-import flashinfer
 
 
-def swizzle_sf(unswizzled_sf: torch.Tensor,
-               original_row: int,
-               original_col: int,
-               scaling_vector_size: int = 16) -> torch.Tensor:
-    """
-    Converts an unswizzled tensor back to swizzled form.
-    
-    Args:
-        unswizzled_sf: Tensor of shape [row, col // scaling_vector_size].
-        original_row: Original row dimension (e.g., 120).
-        original_col: Original column dimension (e.g., 64).
-        scaling_vector_size: Scaling factor (default 16).
-    
-    Returns:
-        Swizzled tensor of shape [padded_row, padded_col].
-    """
-    factor = scaling_vector_size * 4
-    padded_row = (
-        (original_row + 128 - 1) // 128) * 128  # Next multiple of 128
-    padded_col = (
-        (original_col + factor - 1) // factor) * factor  # Next multiple of 64
-
-    # Pad the input tensor to [padded_row, padded_col // scaling_vector_size]
-    pad_rows = padded_row - original_row
-    pad_cols = (padded_col - original_col) // scaling_vector_size
-    padded_sf = torch.nn.functional.pad(unswizzled_sf,
-                                        (0, pad_cols, 0, pad_rows),
-                                        mode='constant',
-                                        value=0)
-
-    # Reshape and transpose to reverse unswizzle_sf
-    num_m_tiles = padded_row // 128
-    num_k_tiles = padded_col // factor
-    sf_reshaped = padded_sf.view(num_m_tiles, 4, 32, num_k_tiles,
-                                 4)  # Reverse reshape
-    sf_swizzled = sf_reshaped.transpose(
-        1, 3)  # Reverse transpose [num_m_tiles, num_k_tiles, 32, 4, 4]
-    sf_swizzled = sf_swizzled.reshape(
-        padded_row, padded_col // scaling_vector_size)  # Flatten to [128, 64]
-
-    return sf_swizzled.contiguous()
+def get_local_sizes():
+    cu_sizes = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
+    sizes = [cu_sizes[0].item()]
+    for i in range(1, len(cu_sizes)):
+        sizes.append((cu_sizes[i] - cu_sizes[i - 1]).item())
+    return sizes
 
 
 class FlashInferCutlassMoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize
@@ -105,13 +71,12 @@ class FlashInferCutlassMoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize
             not use_dp,  # Needs swizzling after communication
         )
         if use_dp:
-            topk_weights, topk_ids = get_ep_group().dispatch(
-                topk_weights, topk_ids)
-            # TODO(shuw): Improve by efficient all-gather
-            a1q, a1q_scale = get_ep_group().dispatch(a1q, a1q_scale)
+            topk_weights, topk_ids, a1q, a1q_scale = \
+                get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale],
+                                           dim=0,
+                                           sizes=get_local_sizes())
             a1_m, a1_n = a1q.shape
-            # a1q_scale = swizzle_sf(a1q_scale, a1_m, a1_n * 2)
-            a1q_scale = flashinfer.fp4_swizzle_blockscale(a1q_scale, a1_m, a1_n * 2)
+            a1q_scale = fp4_swizzle_blockscale(a1q_scale, a1_m, a1_n * 2)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -125,6 +90,9 @@ class FlashInferCutlassMoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize
         use_dp: bool = False,
     ) -> None:
         if use_dp:
-            # TODO(shuw): Improve by efficient reduce-scatter
-            fused_expert_output = get_ep_group().combine(fused_expert_output)
+            fused_expert_output = get_dp_group().reduce_scatter(
+                fused_expert_output,
+                dim=0,
+                sizes=get_local_sizes(),
+            )
         output.copy_(fused_expert_output)
