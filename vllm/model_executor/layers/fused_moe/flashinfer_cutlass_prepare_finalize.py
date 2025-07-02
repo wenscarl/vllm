@@ -25,11 +25,21 @@ class FlashInferCutlassMoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize
 
     def __init__(
         self,
+        max_num_tokens: int,
+        world_size: int,
+        rank: int,
+        dp_size: int,        
         quant_dtype: Optional[torch.dtype] = None,
         per_channel_quant: bool = False,
         block_shape: Optional[list[int]] = None,
     ):
         super().__init__()
+        assert max_num_tokens > 0
+        self.a2a = a2a
+        self.max_num_tokens = max_num_tokens
+        self.world_size = world_size
+        self.rank = rank
+        self.dp_size = dp_size        
         self.per_channel_quant = per_channel_quant
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype

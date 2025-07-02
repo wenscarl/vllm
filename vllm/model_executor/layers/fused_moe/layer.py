@@ -58,6 +58,8 @@ if current_platform.is_cuda_alike():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SIZE,
                                                  DeepEPLLPrepareAndFinalize)
+    if has_flashinfer:
+        from .flashinfer_cutlass_prepare_finalize import FlashInferCutlassMoEPrepareAndFinalizeNoEP
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -326,8 +328,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         prepare_finalize: Optional[Union[PplxPrepareAndFinalize,
                                          DeepEPHTPrepareAndFinalize,
-                                         DeepEPLLPrepareAndFinalize]] = None
-        if moe.use_pplx_kernels:
+                                         DeepEPLLPrepareAndFinalize,
+                                         FlashInferCutlassMoEPrepareAndFinalizeNoEP,]] = None
+        if moe.use_flashinfer_cutlass_kernels:
+            prepare_finalize = FlashInferCutlassMoEPrepareAndFinalizeNoEP(
+                #TODO(shuw): leave a flashinfer 
+                quant_dtype=moe.quant_dtype,  #meaning 2x e2m1 packed in one
+                # TODO(shuw): uint8 for fp4
+            )
+        elif moe.use_pplx_kernels:
             all_to_all_args = dict(
                 max_num_tokens=moe.max_num_tokens,
                 num_experts=moe.num_experts,
@@ -1441,10 +1450,10 @@ class FusedMoE(torch.nn.Module):
                 scoring_func=self.scoring_func,
                 e_score_correction_bias=self.e_score_correction_bias,
                 activation=self.activation,
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
+                # ep_size=self.ep_size,
+                # ep_rank=self.ep_rank,
+                # tp_size=self.tp_size,
+                # tp_rank=self.tp_rank,
             )
 
             if not skip_result_store:
@@ -1506,10 +1515,10 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            ep_rank=self.ep_rank,
-            ep_size=self.ep_size,
-            tp_size=self.tp_size,
-            tp_rank=self.tp_rank,
+            # ep_rank=self.ep_rank,
+            # ep_size=self.ep_size,
+            # tp_size=self.tp_size,
+            # tp_rank=self.tp_rank,
         )
 
         if do_naive_dispatch_combine:
