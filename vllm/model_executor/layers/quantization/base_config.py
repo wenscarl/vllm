@@ -32,7 +32,6 @@ class QuantizeMethodBase(ABC):
 
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
-
     # Not required functions
     def embedding(self, layer: torch.nn.Module, *args,
                   **kwargs) -> torch.Tensor:
