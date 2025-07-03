@@ -102,22 +102,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                               quant_config: Optional[QuantizationConfig]):
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
-        # import pdb
-        # pdb.set_trace()
         self.moe = moe
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
-        # import pdb
-        # pdb.set_trace()
-        if moe.use_flashinfer_cutlass_kernels:
-            # print("yyy"*100)
-            # print(f"moe.quant_dtype:{moe.quant_config.quant_dtype}")
-            prepare_finalize = FlashInferCutlassMoEPrepareAndFinalize(
-                #TODO(shuw): leave a flashinfer, fix later
-                # need to pass from FusedMoEQuantConfig
-                quant_dtype=torch.uint8,
-                # quant_dtype=moe.quant_config.quant_dtype,  #meaning 2x e2m1 packed in one
 
+        if moe.use_flashinfer_cutlass_kernels:
+            prepare_finalize = FlashInferCutlassMoEPrepareAndFinalize(
+                quant_dtype=moe.quant_dtype,
             )
         if moe.use_pplx_kernels:
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(

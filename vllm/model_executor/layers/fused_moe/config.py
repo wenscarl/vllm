@@ -401,6 +401,10 @@ class FusedMoEConfig:
             from vllm.model_executor.layers.quantization.fp8 import Fp8Config
             if quant_dtype is None and isinstance(quant_config, Fp8Config):
                 quant_dtype = torch.float8_e4m3fn
+            
+            from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+            if quant_dtype is None and isinstance(quant_config, ModelOptNvFp4Config):
+                quant_dtype = torch.uint8
 
             if weight_quant is not None:
                 per_out_ch_quant = (
