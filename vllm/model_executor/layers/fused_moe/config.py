@@ -146,6 +146,18 @@ class FusedMoEParallelConfig:
     def use_flashinfer_cutlass_kernels(self):
         return envs.VLLM_USE_FLASHINFER_MOE and has_flashinfer
 
+    @property
+    def use_flashinfer_all2all(self):
+        return (self.use_flashinfer_cutlass_kernels and 
+                self.use_all2all_kernels and
+                envs.VLLM_ALL2ALL_BACKEND == "flashinfer_all2all")
+
+    @property
+    def use_flashinfer_allgather(self):
+        return (self.use_flashinfer_cutlass_kernels and 
+                self.use_all2all_kernels and
+                envs.VLLM_ALL2ALL_BACKEND == "flashinfer_allgather")    
+
     @staticmethod
     def make(tp_size_: int, dp_size_: int, world_size_: int,
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
@@ -348,6 +360,14 @@ class FusedMoEConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_flashinfer_all2all(self):
+        return self.moe_parallel_config.use_flashinfer_all2all
+
+    @property
+    def use_flashinfer_allgather(self):
+        return self.moe_parallel_config.use_flashinfer_allgather  
 
     @property
     def use_flashinfer_cutlass_kernels(self):

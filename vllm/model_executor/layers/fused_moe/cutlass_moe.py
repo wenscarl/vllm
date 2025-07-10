@@ -465,7 +465,7 @@ def run_cutlass_moe_fp4(
     assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
     assert (topk_weights.size(0) == m and topk_ids.size(0)
             == m), ("topk must be provided for each row of a")
-    topk = topk_ids.size(1)
+
     out_dtype = a.dtype
     num_topk = topk_ids.size(1)
 
@@ -493,9 +493,9 @@ def run_cutlass_moe_fp4(
         blockscale_offsets,
         num_topk,
     )
-    c1 = _resize_cache(workspace13, (m * topk, n * 2))
-    c2 = _resize_cache(workspace2, (m * topk, n))
-    c3 = _resize_cache(workspace13, (m * topk, k))
+    c1 = _resize_cache(workspace13, (m * num_topk, n * 2))
+    c2 = _resize_cache(workspace2, (m * num_topk, n))
+    c3 = _resize_cache(workspace13, (m * num_topk, k))
     ops.cutlass_fp4_moe_mm(c1, rep_a_fp4, w1_fp4, rep_a_blockscale,
                                 w1_blockscale, w1_alphas, problem_sizes1,
                                 expert_offsets[:-1], blockscale_offsets[:-1],

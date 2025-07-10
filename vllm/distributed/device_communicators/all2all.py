@@ -7,7 +7,7 @@ import torch.distributed as dist
 
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deep_ep, has_pplx
+from vllm.utils import has_deep_ep, has_pplx, has_flashinfer
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -18,7 +18,17 @@ if TYPE_CHECKING:
 else:
     FusedMoE = None
 
+_flashinfer_all2all = None
+_flashinfer_comm = None
 
+try:
+    from flashinfer import comm as _flashinfer_comm
+    from flashinfer.comm import trtllm_alltoall as _flashinfer_all2all
+    _flashinfer_mnnvlmoe = _flashinfer_all2all.MnvlMoe
+except ImportError:
+    logger.warning("flashinfer.comm.trtllm_alltoall is not available")
+
+has_flashinfer_all2all = _flashinfer_all2all is not None
 class NaiveAll2AllManager(All2AllManagerBase):
     """
     A naive implementation of all2all communication.
@@ -261,3 +271,100 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         # in get_or_create must be updated.
         handle.set_num_sms(self.num_sms)
         return handle
+
+
+class FlashInferAllToAllManager(All2AllManagerBase):
+    """
+    All2All communication based on flashinfer kernels.
+    """
+    def __init__(self, cpu_group):
+        has_flashinfer_all2all = has_flashinfer() and _flashinfer_all2all is not None
+        assert has_flashinfer_all2all, "flashinfer all2all module not found. Please install/check flashinfer"  # noqa
+        super().__init__(cpu_group)
+        logger.debug(
+                "Initialize for flashinfer All2All "
+                "rank=%d, world size=%d", self.rank, self.world_size)
+        self.initialize(
+            world_size=self.world_size,
+            rank=self.rank,
+        )
+
+
+    def initialize(
+        self,
+        world_size: int,
+        rank: int,
+        gpus_per_node: int = 4, #TODO(shuw): remove hardcode
+    ):
+        """Initialize workspace"""
+        if self.initialized and self.world_size == world_size:
+            return
+
+        if _flashinfer_mnnvlmoe is None:
+            logger.warning(
+                "FlashInfer AlltoAll not available, skipping AllToAll workspace "
+                "initialization"
+            )
+            return
+
+        self.cleanup()
+
+        self.mapping = _flashinfer_comm.mapping.Mapping(
+            world_size=world_size,
+            rank=rank,
+            gpus_per_node=gpus_per_node,
+            dp_size=world_size,  #VLLM is dp
+        )
+        self.workspace_tensor = _flashinfer_mnnvlmoe.get_moe_workspaces(self.mapping)
+
+        self.world_size = world_size
+        self.rank = rank
+        self.gpus_per_node = gpus_per_node 
+        self.initialized = True
+
+        logger.info(
+            f"FlashInfer AllToAll workspace initialized for rank {rank}, "
+            f"world_size {world_size}"
+        )
+
+    def cleanup(self):
+        """Clean up workspace"""
+        if self.initialized and self.workspace_tensor is not None:
+            try:
+                del self.workspace_tensor
+            except Exception as e:
+                logger.warning(f"Failed to cleanup FlashInfer workspace: {e}")
+            finally:
+                self.workspace_tensor = None
+                self.mapping = None
+                self.initialized = False
+
+
+_alltoall_workspace_manager = FlashInferAllToAllManager()
+
+
+# def ensure_alltoall_workspace_initialized():
+#     """Ensure workspace is initialized"""
+#     if (
+#         not  has_flashinfer()
+#         or _flashinfer_mnnvlmoe is None
+#     ):
+#         return False
+
+#     world_size = self.dp_world_size
+#     if world_size <= 1:
+#         return False
+
+#     rank = dist.get_rank()
+
+#     if (
+#         not _alltoall_workspace_manager.initialized
+#         or _alltoall_workspace_manager.world_size != world_size
+#     ):
+#         _alltoall_workspace_manager.initialize(
+#             world_size=world_size,
+#             rank=rank,
+#             # TODO(tmorris): Get num gpus per node
+#         )
+
+#     return _alltoall_workspace_manager.initialize            

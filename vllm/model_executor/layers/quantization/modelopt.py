@@ -532,10 +532,16 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         experts_kwargs["ep_size"] = moe_parallel_config.ep_size
         experts_kwargs["tp_rank"] = moe_parallel_config.tp_rank
         experts_kwargs["tp_size"] = moe_parallel_config.tp_size
+
+        prepare_finalize_kwargs = {
+            "ep_rank": moe_parallel_config.ep_rank,
+            "ep_size": moe_parallel_config.ep_size,
+        }
         experts = FlashInferExperts(**experts_kwargs)
         self.fused_experts = mk.FusedMoEModularKernel(
             FlashInferCutlassMoEPrepareAndFinalize(
                 quant_dtype=torch.uint8, 
+                prepare_finalize_kwargs=prepare_finalize_kwargs,
                 #meaning 2x e2m1 packed in one, kernel requirement
             ),
             experts,

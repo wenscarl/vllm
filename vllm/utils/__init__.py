@@ -2969,6 +2969,10 @@ def _has_module(module_name: str) -> bool:
     """
     return importlib.util.find_spec(module_name) is not None
 
+def has_flashinfer() -> bool:
+    """Whether the optional `flashinfer` package is available."""
+
+    return  _has_module("flashinfer")
 
 def has_pplx() -> bool:
     """Whether the optional `pplx_kernels` package is available."""

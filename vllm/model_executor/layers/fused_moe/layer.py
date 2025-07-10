@@ -110,6 +110,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         if moe.use_flashinfer_cutlass_kernels:
             prepare_finalize = FlashInferCutlassMoEPrepareAndFinalize(
                 quant_dtype=moe.quant_dtype,
+                ep_rank=self.moe.moe_parallel_config.ep_rank,
+                ep_size=self.moe.moe_parallel_config.ep_size,
             )
         if moe.use_pplx_kernels:
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
@@ -861,6 +863,14 @@ class FusedMoE(torch.nn.Module):
     @property
     def use_flashinfer_cutlass_kernels(self):
         return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+
+    @property
+    def use_flashinfer_allgather(self):
+        return self.moe_parallel_config.use_flashinfer_allgather  
+ 
+    @property
+    def use_flashinfer_all2all(self):
+        return self.moe_parallel_config.use_flashinfer_all2all
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
