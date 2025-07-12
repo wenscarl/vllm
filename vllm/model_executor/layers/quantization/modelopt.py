@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
@@ -9,10 +8,15 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
+from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    FlashInferExperts, _valid_flashinfer_fused_moe)
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
+    FlashInferCutlassMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -25,24 +29,14 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped)
+    GroupShape, is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts, _valid_flashinfer_fused_moe)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
-    FlashInferCutlassMoEPrepareAndFinalize)
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
-from vllm.distributed import (
-    get_dp_group, get_ep_group, get_tensor_model_parallel_world_size)
-                              
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP)
 try:
     from flashinfer import fp4_quantize as fp4_quantize
     from flashinfer.fused_moe import (
@@ -123,7 +117,8 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config):
         self.quant_config = quant_config
-        self.fp8_linear = Fp8LinearOp()
+        self.fp8_linear = Fp8LinearOp(
+            act_quant_static=True, act_quant_group_shape=GroupShape.PER_TENSOR)
 
     def create_weights(
         self,
@@ -484,7 +479,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
         self.use_marlin = False
         self.allow_flashinfer_cutlass = False
-        
+
         if envs.VLLM_USE_FLASHINFER_MOE:
             if self.cutlass_nvfp4_supported and current_platform.is_cuda() \
                and current_platform.has_device_capability(10, 0):
@@ -505,21 +500,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                  " above.")
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)
-       
+
         self.fused_experts = cutlass_moe_fp4
 
     @property
     def load_up_proj_weight_first(self) -> bool:
         # FlashInfer CUTLASS kernel assumes [Up, Gate] Proj as W13
         return self.allow_flashinfer_cutlass
-    
-    def select_experts_impl(self, moe_parallel_config):      
+
+    def select_experts_impl(self, moe_parallel_config):
         if not self.allow_flashinfer_cutlass:
             # if moe_parallel_config.dp_size > 1:
             #     raise ValueError("CutlassExpertsFp4 Doesn't support DP. "
             #                 "Use flashinfer CUTLASS FusedMoE backend instead.")
             return
-	
+
         logger.debug("FlashInferExperts")
         # default to TP/EP case only
 
@@ -540,7 +535,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         experts = FlashInferExperts(**experts_kwargs)
         self.fused_experts = mk.FusedMoEModularKernel(
             FlashInferCutlassMoEPrepareAndFinalize(
-                quant_dtype=torch.uint8, 
+                quant_dtype=torch.uint8,
                 prepare_finalize_kwargs=prepare_finalize_kwargs,
                 #meaning 2x e2m1 packed in one, kernel requirement
             ),
@@ -553,7 +548,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if self.allow_flashinfer_cutlass:
             return True
         return False
-    
+
     # This method update self.fused_experts
     # only prepare_finalize is not None call select_gemm_impl
     # so when native cutlass fp4, fused_expert is in fuse_moe.py fused_expert
@@ -571,18 +566,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             logger.debug("FlashInferExperts %s", moe)
             experts = FlashInferExperts(
                 use_nvfp4_w4a4=True,
-                use_dp=moe.moe_parallel_config.dp_size>1,
+                use_dp=moe.moe_parallel_config.dp_size > 1,
                 ep_rank=moe.moe_parallel_config.ep_rank,
                 ep_size=moe.moe_parallel_config.ep_size,
                 tp_rank=moe.moe_parallel_config.tp_rank,
                 tp_size=moe.moe_parallel_config.tp_size,
             )
         else:
-            assert moe.dp_size > 1 
+            assert moe.dp_size > 1
             logger.debug("CutlassExpertsFp4 %s", moe)
             # current doesn't support DP
-            raise ValueError("CutlassExpertsFp4 Doesn't support DP. "
-                             "Use flashinfer CUTLASS FusedMoE backend instead.")
+            raise ValueError(
+                "CutlassExpertsFp4 Doesn't support DP. "
+                "Use flashinfer CUTLASS FusedMoE backend instead.")
 
         return experts
 
@@ -788,40 +784,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
-
-        if self.use_marlin:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-            )
-
-            return torch.ops.vllm.fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map)
-
         assert activation == "silu", "Only SiLU activation is supported."
-        assert not apply_router_weight_on_input, (
-            "Router weight on input is not "
-            "supported for ModelOptNvFp4FusedMoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -834,22 +797,40 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-   
+
+        if self.use_marlin:
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=layer.w13_weight_scale_2,
+                global_scale2=layer.w2_weight_scale_2,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
+
         a1_gscale = torch.min(layer.w13_input_scale_quant)
         a2_gscale = torch.min(layer.w2_input_scale_quant)
         if self.allow_flashinfer_cutlass:
             # TP or DP case
             assert _valid_flashinfer_fused_moe(
-                x, layer.w13_weight, layer.w2_weight), ("Flashinfer CUTLASS Fused MoE not applicable!") 
+                x, layer.w13_weight, layer.w2_weight), (
+                    "Flashinfer CUTLASS Fused MoE not applicable!")
             extra_expert_args = {
-              'topk_weights': None, #placeholder topk_weights,
-              'g1_alphas': layer.g1_alphas,
-              'g2_alphas': layer.g2_alphas,
-              'out_dtype': x.dtype,
-              # Avoid confusion with a1_scale and a2_scale whare are batch size 
-              # related.
-              'a1_gscale': a1_gscale,
-              'a2_gscale': a2_gscale,
+                'topk_weights': None,  # placeholder topk_weights,
+                'g1_alphas': layer.g1_alphas,
+                'g2_alphas': layer.g2_alphas,
+                'out_dtype': x.dtype,
+                # Avoid confusion with a1_scale and a2_scale whare are batch size
+                # related.
+                'a1_gscale': a1_gscale,
+                'a2_gscale': a2_gscale,
             }
             extra_prepare_args = {
                 'use_dp': layer.dp_size > 1,
@@ -878,8 +859,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 extra_finalize_args=extra_finalize_args,
             )
         else:
-            from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-                run_cutlass_moe_fp4)
 
             # cutlass_moe_fp4, TP case only(no EP)
             out = self.fused_experts(

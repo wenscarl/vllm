@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
-from typing import Callable, Literal, Optional, overload
+from typing import TYPE_CHECKING, Callable, Literal, Optional, overload
 
 import torch
 import torch.nn.functional as F
@@ -14,7 +14,6 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
-                              get_world_group,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -36,8 +35,6 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
 
-from typing import TYPE_CHECKING
-
 try:
     from flashinfer import fp4_quantize as fp4_quantize
     from flashinfer.fused_moe import (
@@ -58,7 +55,8 @@ if current_platform.is_cuda_alike():
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
     if has_flashinfer:
-        from .flashinfer_cutlass_prepare_finalize import FlashInferCutlassMoEPrepareAndFinalize
+        from .flashinfer_cutlass_prepare_finalize import (
+            FlashInferCutlassMoEPrepareAndFinalize)
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -98,12 +96,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError
 
-    def init_prepare_finalize(self, moe: FusedMoEConfig,
-                              quant_config: Optional[QuantizationConfig]):
+    @staticmethod
+    def maybe_make_prepare_finalize(
+            moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
-
-        self.moe = moe
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
 
@@ -136,6 +133,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 hidden_dim_scale_bytes=hidden_scale_bytes,
             )
 
+            num_dispatchers = (all2all_manager.world_size //
+                               all2all_manager.tp_group.world_size)
+
             # Intranode pplx a2a takes a group name while internode does not.
             if not all2all_manager.internode:
                 all_to_all_args[
@@ -146,10 +146,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
                 max_num_tokens=moe.max_num_tokens,
-                world_size=all2all_manager.world_size,
-                rank=all2all_manager.rank,
-                # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=all2all_manager.tp_group.world_size,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=num_dispatchers,
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
@@ -158,16 +156,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             handle = all2all_manager.get_handle(all_to_all_args)
             prepare_finalize = DeepEPHTPrepareAndFinalize(
                 handle,
-                world_size=all2all_manager.world_size,
-                rank=all2all_manager.rank,
+                num_dispatchers=all2all_manager.world_size,
                 dp_size=all2all_manager.dp_world_size,
                 rank_expert_offset=all2all_manager.rank *
                 moe.num_local_experts,
             )
 
         elif moe.use_deepep_ll_kernels:
-            assert moe.dp_size == all2all_manager.dp_world_size
-
             all_to_all_args = dict(
                 max_num_tokens_per_dp_rank=moe.max_num_tokens,
                 token_hidden_size=moe.hidden_dim,
@@ -185,21 +180,25 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                                 and moe.quant_config.block_shape
                                 == DEEPEP_QUANT_BLOCK_SHAPE)
 
-            # Note (varun): Whether to use FP8 dispatch or not needs some
-            # profiling. Turning it off for now.
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 handle,
                 max_tokens_per_rank=moe.max_num_tokens,
-                world_size=all2all_manager.world_size,
-                dp_size=all2all_manager.dp_world_size,
+                num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
             )
+
+        return prepare_finalize
+
+    def init_prepare_finalize(self, moe: FusedMoEConfig):
+        self.moe = moe
+        prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(
+            self.moe)
 
         self.topk_indices_dtype = None
         if prepare_finalize is not None:
             logger.debug("%s", prepare_finalize.__class__.__name__)
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
-            experts = self.select_gemm_impl(prepare_finalize, moe)
+            experts = self.select_gemm_impl(prepare_finalize, self.moe)
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
@@ -267,18 +266,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         assert self.fused_experts == fused_experts
 
-        all2all_manager = get_ep_group().device_communicator.all2all_manager
-        assert all2all_manager is not None
-
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
             logger.debug("BatchedTritonExperts %s", self.moe)
-            assert self.moe.dp_size == all2all_manager.dp_world_size
             return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
-                world_size=all2all_manager.world_size,
-                # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=all2all_manager.tp_group.world_size,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
@@ -674,14 +667,12 @@ class FusedMoE(torch.nn.Module):
                     get_tensor_model_parallel_world_size())
         dp_size_ = (dp_size
                     if dp_size is not None else get_dp_group().world_size)
-        world_size_ = get_world_group().world_size
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
             FusedMoEParallelConfig.make(
                 tp_size_=tp_size_,
                 dp_size_=dp_size_,
-                world_size_=world_size_,
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts + num_redundant_experts
@@ -765,9 +756,9 @@ class FusedMoE(torch.nn.Module):
         quant_method: Optional[QuantizeMethodBase] = None
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
-        
+
         quant_method.select_experts_impl(self.moe_parallel_config)
-    
+
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
@@ -866,8 +857,8 @@ class FusedMoE(torch.nn.Module):
 
     @property
     def use_flashinfer_allgather(self):
-        return self.moe_parallel_config.use_flashinfer_allgather  
- 
+        return self.moe_parallel_config.use_flashinfer_allgather
+
     @property
     def use_flashinfer_all2all(self):
         return self.moe_parallel_config.use_flashinfer_all2all
@@ -932,18 +923,25 @@ class FusedMoE(torch.nn.Module):
                            expert_data=expert_data,
                            tp_rank=tp_rank)
 
-    def _load_w13(self, expert_data: torch.Tensor, shard_dim: int,
-                  shard_id: str, loaded_weight: torch.Tensor, tp_rank: int):
+    def _load_w13(self,
+                  expert_data: torch.Tensor,
+                  shard_dim: int,
+                  shard_id: str,
+                  loaded_weight: torch.Tensor,
+                  tp_rank: int,
+                  load_full: bool = False):
 
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         shard_size = expert_data.shape[shard_dim] // 2
-        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
-                                             shard_size)
+        if not load_full:
+            loaded_weight = loaded_weight.narrow(shard_dim,
+                                                 shard_size * tp_rank,
+                                                 shard_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         # w3, up_proj: Load into second logical weight of w13.
-        # The FlashInfer Cutlass fused MoE kernel expects the combined weights 
+        # The FlashInfer Cutlass fused MoE kernel expects the combined weights
         # to be ordered as [w3, w1], unlike the standard [w1, w3] layout.
         assert shard_id in ("w1", "w3")
         switch_w13 = getattr(self.quant_method, 'load_up_proj_weight_first',
@@ -1051,6 +1049,27 @@ class FusedMoE(torch.nn.Module):
         if is_gguf_weight_type:
             param.weight_type = loaded_weight.item()
             param.data.copy_(loaded_weight)
+            return True if return_success else None
+
+        # Case for BitsAndBytes
+        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
+        if use_bitsandbytes_4bit:
+            shard_dim = 0
+
+            expert_data = param.data[expert_id]
+            if shard_id == "w2":
+                expert_data.copy_(loaded_weight)
+            elif shard_id in ("w1", "w3"):
+                # BNB inflight quantization has already sharded the weights
+                full_load = True
+                self._load_w13(
+                    shard_id=shard_id,
+                    shard_dim=shard_dim,
+                    loaded_weight=loaded_weight,
+                    expert_data=expert_data,
+                    tp_rank=self.tp_rank,
+                    load_full=full_load,
+                )
             return True if return_success else None
 
         # is_transposed: if the dim to shard the weight
@@ -1229,9 +1248,9 @@ class FusedMoE(torch.nn.Module):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Route the input hidden states to the top-k experts based on the 
+        Route the input hidden states to the top-k experts based on the
         router logits.
-        
+
         Returns:
             (topk_weights, topk_ids) (tuple[torch.Tensor, torch.Tensor]):
             The weights and *global physical* expert ids of the top-k experts.
@@ -1342,6 +1361,8 @@ class FusedMoE(torch.nn.Module):
 
             topk_ids = topk_ids.to(dtype=indices_type)
 
+        assert topk_ids.dtype == indices_type or indices_type is None
+
         return topk_weights, topk_ids
 
     def must_reduce_shared_expert_outputs(self) -> bool:
@@ -1373,8 +1394,13 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
-        return torch.ops.vllm.moe_forward(hidden_states, router_logits,
-                                          self.layer_name)
+        # TODO: Once the OOM issue for the TPU backend is resolved, we will
+        # switch to using the moe_forward custom op.
+        if current_platform.is_tpu():
+            return self.forward_impl(hidden_states, router_logits)
+        else:
+            return torch.ops.vllm.moe_forward(hidden_states, router_logits,
+                                              self.layer_name)
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
@@ -1455,12 +1481,12 @@ class FusedMoE(torch.nn.Module):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
-        # Route to the chunked forward path using the FlashInfer Cutlass kernel 
+        # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
         use_flashinfer_cutlass_kernels = self.dp_size > 1 and self.moe_parallel_config.use_flashinfer_cutlass_kernels
         if (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels or
-                use_flashinfer_cutlass_kernels):
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or use_flashinfer_cutlass_kernels):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
