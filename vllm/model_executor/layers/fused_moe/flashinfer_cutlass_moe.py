@@ -167,19 +167,20 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             w2_scale.view(torch.int32),
             g2_alphas,
         ]
-        _ = flashinfer_cutlass_fused_moe(
-            hidden_states,
-            topk_ids.to(torch.int),
-            topk_weights,
-            # FlashInfer API requires weight to be long for nvfp4
-            w1.view(torch.long),
-            w2.view(torch.long),
-            output_dtype=out_dtype,
-            quant_scales=quant_scales,
-            input_sf=a1q_scale,
-            tp_size=self.tp_size,
-            tp_rank=self.tp_rank,
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-            output=output,
-        )
+        return output
+        # _ = flashinfer_cutlass_fused_moe(
+        #     hidden_states,
+        #     topk_ids.to(torch.int),
+        #     topk_weights,
+        #     # FlashInfer API requires weight to be long for nvfp4
+        #     w1.view(torch.long),
+        #     w2.view(torch.long),
+        #     output_dtype=out_dtype,
+        #     quant_scales=quant_scales,
+        #     input_sf=a1q_scale,
+        #     tp_size=self.tp_size,
+        #     tp_rank=self.tp_rank,
+        #     ep_size=self.ep_size,
+        #     ep_rank=self.ep_rank,
+        #     output=output,
+        # )

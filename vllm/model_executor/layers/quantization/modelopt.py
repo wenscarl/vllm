@@ -536,7 +536,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.fused_experts = mk.FusedMoEModularKernel(
             FlashInferCutlassMoEPrepareAndFinalize(
                 quant_dtype=torch.uint8,
-                prepare_finalize_kwargs=prepare_finalize_kwargs,
+                **prepare_finalize_kwargs,
                 #meaning 2x e2m1 packed in one, kernel requirement
             ),
             experts,

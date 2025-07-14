@@ -647,72 +647,72 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   #
   # Machete kernels
 
-  # The machete kernels only work on hopper and require CUDA 12.0 or later.
-  # Only build Machete kernels if we are building for something compatible with sm90a
-  cuda_archs_loose_intersection(MACHETE_ARCHS "9.0a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND MACHETE_ARCHS)
-    #
-    # For the Machete kernels we automatically generate sources for various
-    # preselected input type pairs and schedules.
-    # Generate sources:
-    set(MACHETE_GEN_SCRIPT
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
-    file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
+  # # The machete kernels only work on hopper and require CUDA 12.0 or later.
+  # # Only build Machete kernels if we are building for something compatible with sm90a
+  # cuda_archs_loose_intersection(MACHETE_ARCHS "9.0a" "${CUDA_ARCHS}")
+  # if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND MACHETE_ARCHS)
+  #   #
+  #   # For the Machete kernels we automatically generate sources for various
+  #   # preselected input type pairs and schedules.
+  #   # Generate sources:
+  #   set(MACHETE_GEN_SCRIPT
+  #     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
+  #   file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
 
-    message(STATUS "Machete generation script hash: ${MACHETE_GEN_SCRIPT_HASH}")
-    message(STATUS "Last run machete generate script hash: $CACHE{MACHETE_GEN_SCRIPT_HASH}")
+  #   message(STATUS "Machete generation script hash: ${MACHETE_GEN_SCRIPT_HASH}")
+  #   message(STATUS "Last run machete generate script hash: $CACHE{MACHETE_GEN_SCRIPT_HASH}")
 
-    if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
-        OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
-      execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
-          ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
-        RESULT_VARIABLE machete_generation_result
-        OUTPUT_VARIABLE machete_generation_output
-        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-      )
+  #   if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
+  #       OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
+  #     execute_process(
+  #       COMMAND ${CMAKE_COMMAND} -E env
+  #       PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
+  #         ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
+  #       RESULT_VARIABLE machete_generation_result
+  #       OUTPUT_VARIABLE machete_generation_output
+  #       OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
+  #       ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
+  #     )
 
-      if (NOT machete_generation_result EQUAL 0)
-        message(FATAL_ERROR "Machete generation failed."
-                            " Result: \"${machete_generation_result}\""
-                            "\nCheck the log for details: "
-                            "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
-      else()
-        set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH}
-            CACHE STRING "Last run machete generate script hash" FORCE)
-        message(STATUS "Machete generation completed successfully.")
-      endif()
-    else()
-      message(STATUS "Machete generation script has not changed, skipping generation.")
-    endif()
+  #     if (NOT machete_generation_result EQUAL 0)
+  #       message(FATAL_ERROR "Machete generation failed."
+  #                           " Result: \"${machete_generation_result}\""
+  #                           "\nCheck the log for details: "
+  #                           "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
+  #     else()
+  #       set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH}
+  #           CACHE STRING "Last run machete generate script hash" FORCE)
+  #       message(STATUS "Machete generation completed successfully.")
+  #     endif()
+  #   else()
+  #     message(STATUS "Machete generation script has not changed, skipping generation.")
+  #   endif()
 
-    # Add machete generated sources
-    file(GLOB MACHETE_GEN_SOURCES "csrc/quantization/machete/generated/*.cu")
-    list(APPEND VLLM_EXT_SRC ${MACHETE_GEN_SOURCES})
+  #   # Add machete generated sources
+  #   file(GLOB MACHETE_GEN_SOURCES "csrc/quantization/machete/generated/*.cu")
+  #   list(APPEND VLLM_EXT_SRC ${MACHETE_GEN_SOURCES})
 
-    # forward compatible
-    set_gencode_flags_for_srcs(
-      SRCS "${MACHETE_GEN_SOURCES}"
-      CUDA_ARCHS "${MACHETE_ARCHS}")
+  #   # forward compatible
+  #   set_gencode_flags_for_srcs(
+  #     SRCS "${MACHETE_GEN_SOURCES}"
+  #     CUDA_ARCHS "${MACHETE_ARCHS}")
 
-    list(APPEND VLLM_EXT_SRC
-      csrc/quantization/machete/machete_pytorch.cu)
+  #   list(APPEND VLLM_EXT_SRC
+  #     csrc/quantization/machete/machete_pytorch.cu)
 
-    message(STATUS "Building Machete kernels for archs: ${MACHETE_ARCHS}")
-  else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
-        AND MACHETE_ARCHS)
-      message(STATUS "Not building Machete kernels as CUDA Compiler version is "
-                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-                     "later if you intend on running w4a16 quantized models on "
-                     "Hopper.")
-    else()
-      message(STATUS "Not building Machete kernels as no compatible archs "
-                     "found in CUDA target architectures")
-    endif()
-  endif()
+  #   message(STATUS "Building Machete kernels for archs: ${MACHETE_ARCHS}")
+  # else()
+  #   if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0
+  #       AND MACHETE_ARCHS)
+  #     message(STATUS "Not building Machete kernels as CUDA Compiler version is "
+  #                    "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+  #                    "later if you intend on running w4a16 quantized models on "
+  #                    "Hopper.")
+  #   else()
+  #     message(STATUS "Not building Machete kernels as no compatible archs "
+  #                    "found in CUDA target architectures")
+  #   endif()
+  # endif()
 # if CUDA endif
 endif()
 
@@ -770,58 +770,58 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   # 9.0 for latest bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
-  if (MARLIN_MOE_ARCHS)
+  # cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
+  # if (MARLIN_MOE_ARCHS)
 
-    #
-    # For the Marlin MOE kernels we automatically generate sources for various
-    # preselected input type pairs and schedules.
-    # Generate sources:
-    set(MOE_MARLIN_GEN_SCRIPT
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py)
-    file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
+  #   #
+  #   # For the Marlin MOE kernels we automatically generate sources for various
+  #   # preselected input type pairs and schedules.
+  #   # Generate sources:
+  #   set(MOE_MARLIN_GEN_SCRIPT
+  #     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py)
+  #   file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
 
-    message(STATUS "Marlin MOE generation script hash: ${MOE_MARLIN_GEN_SCRIPT_HASH}")
-    message(STATUS "Last run Marlin MOE generate script hash: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}")
+  #   message(STATUS "Marlin MOE generation script hash: ${MOE_MARLIN_GEN_SCRIPT_HASH}")
+  #   message(STATUS "Last run Marlin MOE generate script hash: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}")
 
-    if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}
-        OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH})
-      execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=$PYTHONPATH
-          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT}
-        RESULT_VARIABLE moe_marlin_generation_result
-        OUTPUT_VARIABLE moe_marlin_generation_output
-        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
-        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
-      )
+  #   if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}
+  #       OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH})
+  #     execute_process(
+  #       COMMAND ${CMAKE_COMMAND} -E env
+  #       PYTHONPATH=$PYTHONPATH
+  #         ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT}
+  #       RESULT_VARIABLE moe_marlin_generation_result
+  #       OUTPUT_VARIABLE moe_marlin_generation_output
+  #       OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
+  #       ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
+  #     )
 
-      if (NOT moe_marlin_generation_result EQUAL 0)
-        message(FATAL_ERROR "Marlin MOE generation failed."
-                            " Result: \"${moe_marlin_generation_result}\""
-                            "\nCheck the log for details: "
-                            "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
-      else()
-        set(MOE_MARLIN_GEN_SCRIPT_HASH ${MOE_MARLIN_GEN_SCRIPT_HASH}
-            CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
-        message(STATUS "Marlin MOE generation completed successfully.")
-      endif()
-    else()
-      message(STATUS "Marlin MOE generation script has not changed, skipping generation.")
-    endif()
+  #     if (NOT moe_marlin_generation_result EQUAL 0)
+  #       message(FATAL_ERROR "Marlin MOE generation failed."
+  #                           " Result: \"${moe_marlin_generation_result}\""
+  #                           "\nCheck the log for details: "
+  #                           "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
+  #     else()
+  #       set(MOE_MARLIN_GEN_SCRIPT_HASH ${MOE_MARLIN_GEN_SCRIPT_HASH}
+  #           CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
+  #       message(STATUS "Marlin MOE generation completed successfully.")
+  #     endif()
+  #   else()
+  #     message(STATUS "Marlin MOE generation script has not changed, skipping generation.")
+  #   endif()
 
-    file(GLOB MOE_WNAA16_MARLIN_SRC "csrc/moe/marlin_moe_wna16/*.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${MOE_WNAA16_MARLIN_SRC}"
-      CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
+  #   file(GLOB MOE_WNAA16_MARLIN_SRC "csrc/moe/marlin_moe_wna16/*.cu")
+  #   set_gencode_flags_for_srcs(
+  #     SRCS "${MOE_WNAA16_MARLIN_SRC}"
+  #     CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
 
-    list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
+  #   list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
 
-    message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
-  else()
-    message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
-                   " in CUDA target architectures")
-  endif()
+  #   message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
+  # else()
+  #   message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
+  #                  " in CUDA target architectures")
+  # endif()
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")

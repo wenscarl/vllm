@@ -24,7 +24,7 @@ _flashinfer_comm = None
 try:
     from flashinfer import comm as _flashinfer_comm
     from flashinfer.comm import trtllm_alltoall as _flashinfer_all2all
-    _flashinfer_mnnvlmoe = _flashinfer_all2all.MnvlMoe
+    _flashinfer_mnnvlmoe = _flashinfer_all2all.MnnvlMoe
 except ImportError:
     logger.warning("flashinfer.comm.trtllm_alltoall is not available")
 
@@ -284,10 +284,12 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         logger.debug(
                 "Initialize for flashinfer All2All "
                 "rank=%d, world size=%d", self.rank, self.world_size)
-        self.initialize(
-            world_size=self.world_size,
-            rank=self.rank,
-        )
+        self.initialized = False
+        # self.initialize(
+        #     world_size=self.world_size,
+        #     rank=self.rank,
+        # )
+        
 
 
     def initialize(
@@ -308,14 +310,28 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             return
 
         self.cleanup()
-
+        logger.debug(
+                "making map: "
+                "rank=%d, world size=%d", rank, world_size)
         self.mapping = _flashinfer_comm.mapping.Mapping(
             world_size=world_size,
             rank=rank,
             gpus_per_node=gpus_per_node,
-            dp_size=world_size,  #VLLM is dp
+            tp_size=4,
+            # dp_size=world_size,  #VLLM is dp
         )
-        self.workspace_tensor = _flashinfer_mnnvlmoe.get_moe_workspaces(self.mapping)
+        from flashinfer.comm.mnnvl import MnnvlConfig
+        from vllm.distributed.device_communicators.vllm_mnnvl_compat import (
+            vLLMCommBackend)
+        def get_vllm_mnnvl_config() -> MnnvlConfig:
+            """Ready-to-use config for vLLM"""
+            return MnnvlConfig(
+                comm_backend=vLLMCommBackend(),
+                fabric_page_size=1 << 29,  # 512MB
+                allocation_granularity=0    # Auto-detect
+            )
+        tp_config = get_vllm_mnnvl_config()
+        self.workspace_tensor = _flashinfer_mnnvlmoe.get_moe_workspaces(self.mapping, tp_config)
 
         self.world_size = world_size
         self.rank = rank
@@ -340,7 +356,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 self.initialized = False
 
 
-_alltoall_workspace_manager = FlashInferAllToAllManager()
+# _alltoall_workspace_manager = FlashInferAllToAllManager()
 
 
 # def ensure_alltoall_workspace_initialized():

@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from flashinfer.comm.trtllm_alltoall import MnnvlMoe as MnnvlMoe
 from flashinfer.comm.trtllm_alltoall import MoEAlltoallInfo as MoEAlltoallInfo
 
+# from vllm.distributed.device_communicators.vllm_mnnvl_compat import (
+#             vLLMToMPIShim)
+
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.distributed import get_dp_group
+from vllm.distributed import (get_dp_group, get_tp_group)
 from vllm.distributed.device_communicators.all2all import (
     FlashInferAllToAllManager)
 from vllm.forward_context import get_forward_context
@@ -17,8 +20,14 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
 _alltoall_manager = None
-_flashinfer_mnnvlmoe = FlashInferAllToAllManager()
+# print('xx'*100)
+# print(get_tp_group().cpu_group)
+# _flashinfer_mnnvlmoe = FlashInferAllToAllManager(get_tp_group().cpu_group)
 
+# from flashinfer.comm.mnnvl import MpiComm
+# print(f"MpiComm was to: {MpiComm}")
+# MpiComm = vLLMToMPIShim
+# print(f"MpiComm Repaced to: {MpiComm}")
 
 def get_local_sizes(local_tokens):
     cu_sizes = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
@@ -52,7 +61,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.quant_dtype = quant_dtype
         self.ep_rank = ep_rank
         self.ep_size = ep_size
-        self.alltoall_info = None
+        # self.alltoall_info = None
 
     @property
     def alltoall_info(self) -> MoEAlltoallInfo:
@@ -88,6 +97,16 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
+
+        print('xx'*100)
+        print(get_tp_group().cpu_group)
+        print(get_tp_group().rank_in_group)
+        print(get_tp_group().world_size)
+        _flashinfer_mnnvlmoe = FlashInferAllToAllManager(get_tp_group().cpu_group)
+        _flashinfer_mnnvlmoe.initialize(
+            world_size=get_tp_group().world_size,
+            rank=get_tp_group().rank_in_group,
+        )
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
@@ -105,8 +124,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
         else:
             #TODO(shuw): make env var
-            enable_flashinfer_fp4_allgather = False
-            enable_flashinfer_alltoall = True
+            enable_flashinfer_fp4_allgather = True
+            enable_flashinfer_alltoall = False
 
             if enable_flashinfer_alltoall:
                 global_num_tokens_cpu = get_forward_context(
@@ -141,6 +160,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                             sizes=get_local_sizes(local_tokens))
 
             if enable_flashinfer_alltoall:
+                print("all2allcalling"*100)
                 a1q = MnnvlMoe.mnnvl_moe_alltoallv(a1q, self.alltoall_info,
                                                    self.alltoall_workspace,
                                                    self.ep_rank, self.ep_size)
@@ -167,8 +187,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> None:
         if use_dp:
             # TODO(shuw): env var later
-            enable_flashinfer_fp4_allgather = False
-            enable_flashinfer_alltoall = True
+            enable_flashinfer_fp4_allgather = True
+            enable_flashinfer_alltoall = False
             if enable_flashinfer_fp4_allgather:
                 fused_expert_output = get_dp_group().reduce_scatterv(
                     fused_expert_output,
