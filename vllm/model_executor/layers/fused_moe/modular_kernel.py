@@ -741,7 +741,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts = local_num_experts
 
         extra_prepare_kwargs = extra_prepare_args or {}
-
         (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
              a1,

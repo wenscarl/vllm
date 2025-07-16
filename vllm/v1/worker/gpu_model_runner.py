@@ -83,6 +83,7 @@ else:
         "xgr_torch_compile", globals(),
         "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
+from flashinfer.autotuner import autotune
 logger = init_logger(__name__)
 
 
@@ -2272,10 +2273,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
+
+        with autotune():
+            # self.profile_run()
+            compilation_cases = reversed(self.cudagraph_batch_sizes)
+            if is_global_first_rank():
+                compilation_cases = tqdm(
+                    list(compilation_cases),
+                    disable=not self.load_config.use_tqdm_on_load,
+                    desc="Autotune shapes")
+            for num_tokens in compilation_cases:
+                # We skip EPLB here since we don't want to record dummy metrics
+                for _ in range(1):
+                        # self.compilation_config.cudagraph_num_of_warmups):
+                    hs, last_hs = self._dummy_run(num_tokens,
+                                                  skip_eplb=True,
+                                                  is_profile=True)
+            del hs, last_hs
+
+
+
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        with graph_capture(device=self.device):
+        with graph_capture(device=self.device):#, autotune():
             full_cg = self.full_cuda_graph
             # Only rank 0 should print progress bar during capture
             compilation_cases = reversed(self.cudagraph_batch_sizes)
