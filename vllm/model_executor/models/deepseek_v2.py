@@ -187,7 +187,7 @@ class DeepseekV2MoE(nn.Module):
         if hidden_states.dtype != torch.float16:
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
-                router_logits=router_logits) * self.routed_scaling_factor
+                router_logits=router_logits)# * self.routed_scaling_factor
         else:
             # Fix FP16 overflow
             # See DeepseekV2DecoderLayer for more details.
