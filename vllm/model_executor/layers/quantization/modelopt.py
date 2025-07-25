@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Callable, Optional, Union
+from enum import Enum
 
 import torch
 from torch.nn import Module
@@ -26,7 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
-    prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
+    prepare_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape, is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -40,6 +41,11 @@ logger = init_logger(__name__)
 
 QUANT_ALGOS = ["FP8", "NVFP4"]
 KV_CACHE_QUANT_ALGOS = ["FP8"]
+
+
+class FlashInferMoEBackend(Enum):
+    high_throughput = "flashinfer_moe_high_throughput"
+    low_latency = "flashinfer_moe_low_latency"
 
 
 class ModelOptFp8Config(QuantizationConfig):
@@ -878,6 +884,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
         self.use_marlin = False
         self.allow_flashinfer = False
+        self.flashinfer_moe_backend = None
 
         if envs.VLLM_USE_FLASHINFER_MOE_FP4:
             if self.cutlass_nvfp4_supported and current_platform.is_cuda() \
@@ -885,14 +892,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 self.allow_flashinfer = True
                 flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
                 if flashinfer_moe_backend == "flashinfer_moe_high_throughput":
-                    self.flashinfer_moe_backend = "CUTLASS"
+                    self.flashinfer_moe_backend = FlashInferMoEBackend.high_throughput
                     logger.info_once(
-                        "Using FlashInfer CUTLASS kernels for ModelOptNvFp4FusedMoE."
+                        "Using FlashInfer High Throughput (CUTLASS) kernels for ModelOptNvFp4FusedMoE."
                     )
                 elif flashinfer_moe_backend == "flashinfer_moe_low_latency":
-                    self.flashinfer_moe_backend = "TensorRT-LLM"
+                    self.flashinfer_moe_backend = FlashInferMoEBackend.low_latency
                     logger.info_once(
-                        "Using FlashInfer TensorRT-LLM kernels for ModelOptNvFp4FusedMoE."
+                        "Using FlashInfer Low Latency (TensorRT-LLM) kernels for ModelOptNvFp4FusedMoE."
                     )
                 else:
                     raise ValueError(
@@ -921,7 +928,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             return
 
         # default to TP/EP case only
-        if self.flashinfer_moe_backend == "TensorRT-LLM":
+        if self.flashinfer_moe_backend == FlashInferMoEBackend.low_latency:
             # TODO(shuw)
             # logger.debug_once("FlashInferExpertsTRTLLM")
             experts_kwargs: dict[str, Any] = {
@@ -944,7 +951,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 experts,
             )
 
-        elif self.flashinfer_moe_backend == "CUTLASS":
+        elif self.flashinfer_moe_backend == FlashInferMoEBackend.high_throughput:
             logger.debug_once("FlashInferExpertsCUTLASS")
             experts_kwargs: dict[str, Any] = {
                 "use_nvfp4_w4a4": True,
@@ -1133,10 +1140,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         num_experts,
     ):
         from flashinfer import (
-            RoutingMethodType,
-            e2m1_and_ufp8sf_scale_to_float,
-            fp4_quantize,
-            next_positive_power_of_2,
             reorder_rows_for_gated_act_gemm,
             shuffle_matrix_a,
             shuffle_matrix_sf_a,
@@ -1336,7 +1339,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # GEMM 1
         # The FlashInfer Cutlass fused MoE kernel expects the combined weights
         # to be ordered as [w3, w1], unlike the standard [w1, w3] layout.
-        assert self.flashinfer_moe_backend == "TensorRT-LLM"
+        if self.flashinfer_moe_backend != FlashInferMoEBackend.low_latency:
+            return
         assert self.allow_flashinfer == True
         gemm1_weight = layer.w13_weight.data
         assert (
@@ -1467,8 +1471,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         assert activation == "silu", "Only SiLU activation is supported."
 
         skip_select_experts = False
-        if self.fused_experts is not None and self.flashinfer_moe_backend == "TensorRT-LLM":
-            skip_select_experts = True
+        if self.fused_experts is not None:
+            skip_select_experts = self.flashinfer_moe_backend == FlashInferMoEBackend.low_latency
+       
         if not skip_select_experts:
             topk_weights, topk_ids = FusedMoE.select_experts(
                 hidden_states=x,
@@ -1523,10 +1528,29 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 device=x.device,
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input)
-        else:
-            if self.flashinfer_moe_backend == "TensorRT-LLM":
-                # TP case
-                # out = self.fused_experts(                )
+        else: # modular kernel is provided
+            # CUTLASS MoE backend support global scaling factor per expert
+            a1_gscale = layer.w13_input_scale_quant
+            a2_gscale = layer.w2_input_scale_quant
+            extra_expert_args = {
+                'g1_alphas': layer.g1_alphas,
+                'g2_alphas': layer.g2_alphas,
+                'out_dtype': x.dtype,
+                # Avoid confusion with a1_scale and a2_scale
+                # where are batch size related.
+                'a1_gscale': a1_gscale,
+                'a2_gscale': a2_gscale,
+            }
+            extra_prepare_args = {
+                'use_dp': layer.dp_size > 1,
+                'local_tokens': x.shape[0],
+                'a1_gscale': a1_gscale,
+            }
+            extra_finalize_args = {
+                'use_dp': layer.dp_size > 1,
+                'local_tokens': x.shape[0],
+            }
+            if self.flashinfer_moe_backend == FlashInferMoEBackend.low_latency:
                 from flashinfer import fused_moe as fused_moe
                 import flashinfer
                 a1_gscale = layer.w13_input_scale_quant
@@ -1534,11 +1558,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                     x, a1_gscale, 
                     is_sf_swizzled_layout=False,
                 )
-                # num_experts = 
-                # print("gen"*20)
-                # print(f"use_grouped_topk:{use_grouped_topk}")
-                # print(f"imm:{layer.w13_weight.shape[1] // 2}")
-                # print(f"num_loc_expert:{layer.w13_weight.shape[0]}")
+                print("router_logits.shape:", router_logits.shape)
+                print("e_score_correction_bias.shape:", e_score_correction_bias.shape)
+                print("hidden_states_fp4.shape:", hidden_states_fp4.shape)
+                print("hidden_states_scale_linear_fp4.shape:", hidden_states_scale_linear_fp4.shape)
+                print("layer.gemm1_weights_fp4_shuffled.shape:", layer.gemm1_weights_fp4_shuffled.shape)
+                print("layer.gemm1_scales_fp4_shuffled.shape:", layer.gemm1_scales_fp4_shuffled.shape)
+                print("layer.gemm2_weights_fp4_shuffled.shape:", layer.gemm2_weights_fp4_shuffled.shape)
+                print("layer.gemm2_scales_fp4_shuffled.shape:", layer.gemm2_scales_fp4_shuffled.shape)
+                print("layer.g1_scale_c.shape:", layer.g1_scale_c.shape)
+                print("layer.g1_alphas.shape:", layer.g1_alphas.shape)
+                print("layer.g2_alphas.shape:", layer.g2_alphas.shape)
+
+
                 out = fused_moe.trtllm_fp4_block_scale_moe(
                     router_logits.to(torch.float32),
                     e_score_correction_bias,
@@ -1551,67 +1583,26 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                     layer.g1_scale_c.data,
                     layer.g1_alphas.data,
                     layer.g2_alphas.data,
-                    256, #layer.w13_weight.shape[0], #num_experts,
-                    top_k,
-                    8, #layer.n_group,
-                    4, #layer.top_k_group,
-                    512, #layer.w13_weight.shape[1] // 2, # imm
-                    0, # local_expert_offset
-                    256, #layer.w13_weight.shape[0], # loc_num_experts,
-                    2.5, #layer.routed_scaling,
-                    8, #tile_tokens_dim,
-                    flashinfer.RoutingMethodType.DeepSeekV3,
+                    num_experts=256, #layer.w13_weight.shape[0], #num_experts,
+                    top_k=top_k,
+                    n_group=8, #layer.n_group,
+                    topk_group=4, #layer.top_k_group,
+                    intermediate_size=2048, #layer.w13_weight.shape[1] // 2, # imm
+                    local_expert_offset=0, # local_expert_offset
+                    local_num_experts=256, #layer.w13_weight.shape[0], # loc_num_experts,
+                    routed_scaling_factor=2.5, #layer.routed_scaling,
+                    tile_tokens_dim=8, #tile_tokens_dim,
+                    routing_method_type=flashinfer.RoutingMethodType.DeepSeekV3,
                     do_finalize=True,
                 )[0]
-            elif self.flashinfer_moe_backend == "CUTLASS":
+            elif self.flashinfer_moe_backend == FlashInferMoEBackend.high_throughput:
                 # TP or DP case
                 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                     is_valid_flashinfer_cutlass_fused_moe)
                 assert is_valid_flashinfer_cutlass_fused_moe(
                     x, layer.w13_weight,
                     layer.w2_weight), ("Flashinfer Fused MoE not applicable!")
-                # CUTLASS MoE backend support global scaling factor per expert
-                a1_gscale = layer.w13_input_scale_quant
-                a2_gscale = layer.w2_input_scale_quant
-                extra_expert_args = {
-                    'g1_alphas': layer.g1_alphas,
-                    'g2_alphas': layer.g2_alphas,
-                    'out_dtype': x.dtype,
-                    # Avoid confusion with a1_scale and a2_scale
-                    # where are batch size related.
-                    'a1_gscale': a1_gscale,
-                    'a2_gscale': a2_gscale,
-                }
-                extra_prepare_args = {
-                    'use_dp': layer.dp_size > 1,
-                    'local_tokens': x.shape[0],
-                    'a1_gscale': a1_gscale,
-                }
-                extra_finalize_args = {
-                    'use_dp': layer.dp_size > 1,
-                    'local_tokens': x.shape[0],
-                }
-
-                a1_gscale = layer.w13_input_scale_quant
-                a2_gscale = layer.w2_input_scale_quant
-                extra_expert_args = {
-                    'g1_alphas': layer.g1_alphas,
-                    'g2_alphas': layer.g2_alphas,
-                    'out_dtype': x.dtype,
-                    # Avoid confusion with a1_scale and a2_scale
-                    # where are batch size related.
-                    'a1_gscale': a1_gscale,
-                    'a2_gscale': a2_gscale,
-                }
-                extra_prepare_args = {
-                    'use_dp': layer.dp_size > 1,
-                    'local_tokens': x.shape[0],
-                    'a1_gscale': a1_gscale,
-                }
-                extra_finalize_args = {
-                    'use_dp': layer.dp_size > 1,
-                    'local_tokens': x.shape[0],
-                }
+ 
                 out = self.fused_experts(
                     hidden_states=x,
                     w1=layer.w13_weight,
