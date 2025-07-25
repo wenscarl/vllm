@@ -35,6 +35,7 @@ from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils import next_power_of_2
 
 logger = init_logger(__name__)
 
@@ -1225,30 +1226,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             .reshape(num_experts, hidden_size, intermediate_size // 16)
         )
         return gemm1_weights_fp4_shuffled, gemm1_scales_fp4_shuffled, gemm2_weights_fp4_shuffled, gemm2_scales_fp4_shuffled
-
-        # # Calculate scaling factors that depend on weights
-        # scale_c_fc1 = (
-        #     args_dequant['c_global_sf']
-        #     * (1.0 / args['gemm1_scales_global'])
-        #     * (1.0 / args['hidden_states_scale_global'])
-        # )
-        # scale_gate_fc1 = (1.0 / args['gemm1_scales_global']) * (
-        #     1.0 / args['hidden_states_scale_global']
-        # )
-        # scale_c_fc2 = (1.0 / args_dequant['c_global_sf']) * (
-        #     1.0 / args['gemm2_scales_global']
-        # )
-
-        # return {
-        #     "gemm1_weights_fp4_shuffled": gemm1_weights_fp4_shuffled,
-        #     "gemm1_scales_fp4_shuffled": gemm1_scales_fp4_shuffled,
-        #     "gemm2_weights_fp4_shuffled": gemm2_weights_fp4_shuffled,
-        #     "gemm2_scales_fp4_shuffled": gemm2_scales_fp4_shuffled,
-        #     "scale_c_fc1": scale_c_fc1,
-        #     "scale_gate_fc1": scale_gate_fc1,
-        #     "scale_c_fc2": scale_c_fc2,
-        # }
-
+        
     # def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
     #     # GEMM 1
     #     # The FlashInfer Cutlass fused MoE kernel expects the combined weights
@@ -1262,12 +1240,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     #         assert size % 2 == 0, f"Expected even size in dim {dim}, got {size}"
     #         half = size // 2
 
-    #         # Reorder weight and scales
+    #         # Reorder weight
     #         w1, w3 = gemm1_weight.split(half, dim=dim)
-    #         s1, s3 = gemm1_weight_scale.split(half, dim=dim)
-    #         gemm1_weight_scale = torch.cat([s3, s1], dim=dim).contiguous()
     #         gemm1_weight = torch.cat([w3, w1], dim=dim).contiguous()
 
+    #         # Reorder scale
+    #         s1, s3 = gemm1_weight_scale.split(half, dim=dim)
+    #         gemm1_weight_scale = torch.cat([s3, s1], dim=dim).contiguous()
 
     #     layer.w13_weight = Parameter(gemm1_weight, requires_grad=False)
     #     layer.w13_weight_scale = Parameter(gemm1_weight_scale,
@@ -1329,115 +1308,233 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     #         del layer.w13_input_scale_quant
     #         del layer.w2_input_scale_quant
     #         del layer.w13_blockscale_swizzled
-    #         del layer.w2_blockscale_swizzled
+    #         del layer.w2_blockscale_swizzled        
+    # def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    #     # TRTLLM_gen only
+    #     # GEMM 1
+    #     # The FlashInfer Cutlass fused MoE kernel expects the combined weights
+    #     # to be ordered as [w3, w1], unlike the standard [w1, w3] layout.
+    #     assert self.flashinfer_moe_backend == "TensorRT-LLM"
+    #     assert self.allow_flashinfer == True
+    #     gemm1_weight = layer.w13_weight.data
+    #     assert (
+    #         layer.w13_weight_scale.shape[2] % 16 == 0
+    #     ), "Expected weight_scale.dim(1) to be divisible by 16"
+    #     assert (
+    #         layer.w13_weight_scale.dtype == torch.float8_e4m3fn
+    #     ), "Weight Blockscale must be represented as FP8-E4M3"
+    #     gemm1_weight_scale = layer.w13_weight_scale.data
         
+    #     dim = -2
+    #     size = gemm1_weight.size(dim)
+    #     assert size % 2 == 0, f"Expected even size in dim {dim}, got {size}"
+    #     half = size // 2
+
+    #     # Reorder weight and scales
+    #     w1, w3 = gemm1_weight.split(half, dim=dim)
+    #     s1, s3 = gemm1_weight_scale.split(half, dim=dim)
+    #     gemm1_weight_scale = torch.cat([s3, s1], dim=dim).contiguous()
+    #     gemm1_weight = torch.cat([w3, w1], dim=dim).contiguous()
+
+
+    #     layer.w13_weight = Parameter(gemm1_weight, requires_grad=False)
+    #     layer.w13_weight_scale = Parameter(gemm1_weight_scale,
+    #                                        requires_grad=False)
+
+    #     if not torch.allclose(layer.w13_weight_scale_2[:, 0],
+    #                           layer.w13_weight_scale_2[:, 1]):
+    #         logger.warning_once(
+    #             "w1_weight_scale_2 must match w3_weight_scale_2. "
+    #             "Accuracy may be affected.")
+
+    #     w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
+    #     layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
+    #                                          requires_grad=False)
+         
+
+    #     w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(
+    #         torch.float32)
+    #     # This is for quantization, so we need to invert it.
+    #     layer.w13_input_scale_quant = Parameter(
+    #         (1 / w13_input_scale).to(torch.float32), requires_grad=False
+    #     )        
+    #     layer.g1_alphas = Parameter(
+    #         (w13_input_scale * w13_weight_scale_2).to(torch.float32),
+    #         requires_grad=False,
+    #     )
+
+    #     # GEMM 2
+    #     # TODO(shuw): check to use vector
+    #     w2_input_scale = layer.w2_input_scale
+    #     layer.g2_alphas = Parameter(
+    #         (w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
+    #         requires_grad=False,
+    #     )
+    #      # This is for quantization, so we need to invert it.
+    #     layer.w2_input_scale_quant = Parameter(
+    #         (1 / w2_input_scale).to(torch.float32), requires_grad=False
+    #     )
+
+    #     # W2 weight and weight scales
+    #     assert (layer.w2_weight_scale.shape[2] % 16 == 0), (
+    #         "Expected weight_scale.dim(1) to be divisible by 16")
+    #     assert (layer.w2_weight_scale.dtype == torch.float8_e4m3fn), (
+    #         "Weight Blockscale must be represented as FP8-E4M3")
+    #     layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
+    #     layer.w2_weight_scale = Parameter(
+    #         layer.w2_weight_scale.data, requires_grad=False
+    #     )
+    #     layer.g1_scale_c = Parameter(
+    #         (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
+    #         requires_grad=False,
+    #     )
+
+    #     gemm1_weights_fp4_shuffled, \
+    #         gemm1_scales_fp4_shuffled, \
+    #             gemm2_weights_fp4_shuffled, \
+    #                 gemm2_scales_fp4_shuffled = self.prepare_static_weights_for_kernel(
+    #                                                 layer.w13_weight, layer.w2_weight,
+    #                                                 layer.w13_weight_scale, layer.w2_weight_scale,
+    #                                                 layer.w2_weight.size(-2), # hidden_size
+    #                                                 layer.w13_weight.size(-2) // 2, #intermediate_size
+    #                                                 layer.w13_weight.size(0), #num_experts,
+    #                                             )
+        
+    #     layer.gemm1_weights_fp4_shuffled = Parameter(gemm1_weights_fp4_shuffled,
+    #                                          requires_grad=False)
+    #     layer.gemm2_weights_fp4_shuffled = Parameter(gemm2_weights_fp4_shuffled,
+    #                                          requires_grad=False)
+    #     layer.gemm1_scales_fp4_shuffled = Parameter(gemm1_scales_fp4_shuffled,
+    #                                     requires_grad=False)
+    #     layer.gemm2_scales_fp4_shuffled = Parameter(gemm2_scales_fp4_shuffled,
+    #                                     requires_grad=False)        
+    #     del layer.w2_weight
+    #     del layer.w2_weight_scale
+    #     del layer.w13_weight
+    #     del layer.w13_weight_scale
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # TRTLLM_gen only
-        # GEMM 1
-        # The FlashInfer Cutlass fused MoE kernel expects the combined weights
-        # to be ordered as [w3, w1], unlike the standard [w1, w3] layout.
-        assert self.flashinfer_moe_backend == "TensorRT-LLM"
-        assert self.allow_flashinfer == True
+        # GEMM 1 processing
         gemm1_weight = layer.w13_weight.data
-        assert (
-            layer.w13_weight_scale.shape[2] % 16 == 0
-        ), "Expected weight_scale.dim(1) to be divisible by 16"
-        assert (
-            layer.w13_weight_scale.dtype == torch.float8_e4m3fn
-        ), "Weight Blockscale must be represented as FP8-E4M3"
         gemm1_weight_scale = layer.w13_weight_scale.data
-        
-        dim = -2
-        size = gemm1_weight.size(dim)
-        assert size % 2 == 0, f"Expected even size in dim {dim}, got {size}"
-        half = size // 2
 
-        # Reorder weight and scales
-        w1, w3 = gemm1_weight.split(half, dim=dim)
-        s1, s3 = gemm1_weight_scale.split(half, dim=dim)
-        gemm1_weight_scale = torch.cat([s3, s1], dim=dim).contiguous()
-        gemm1_weight = torch.cat([w3, w1], dim=dim).contiguous()
+        # Reorder weights for flashinfer backends
+        if self.allow_flashinfer:
+            dim = -2
+            size = gemm1_weight.size(dim)
+            assert size % 2 == 0, f"Expected even size in dim {dim}, got {size}"
+            half = size // 2
 
+            # Reorder weight and scales (w1 and w3 swapped for flashinfer)
+            w1, w3 = gemm1_weight.split(half, dim=dim)
+            gemm1_weight = torch.cat([w3, w1], dim=dim).contiguous()
+
+            # Reorder scale
+            s1, s3 = gemm1_weight_scale.split(half, dim=dim)
+            gemm1_weight_scale = torch.cat([s3, s1], dim=dim).contiguous()
 
         layer.w13_weight = Parameter(gemm1_weight, requires_grad=False)
         layer.w13_weight_scale = Parameter(gemm1_weight_scale,
-                                           requires_grad=False)
-        # self.trtllm_gen_process_expert_w3_w1_weight(layer)
-        # self.trtllm_gen_process_expert_w3_w1_weight_scale_nvfp4(layer)
+                                        requires_grad=False)
 
+        # Common processing for w13_weight_scale_2
         if not torch.allclose(layer.w13_weight_scale_2[:, 0],
-                              layer.w13_weight_scale_2[:, 1]):
+                            layer.w13_weight_scale_2[:, 1]):
             logger.warning_once(
                 "w1_weight_scale_2 must match w3_weight_scale_2. "
                 "Accuracy may be affected.")
 
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
-                                             requires_grad=False)
-         
+                                            requires_grad=False)
 
-        w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(
-            torch.float32)
-        # This is for quantization, so we need to invert it.
-        layer.w13_input_scale_quant = Parameter(
-            (1 / w13_input_scale).to(torch.float32), requires_grad=False
-        )        
+        # Common processing for input scales and alphas
+        # w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(
+            # torch.float32)
+        w13_input_scale = layer.w13_input_scale.max().to(
+            torch.float32)        
         layer.g1_alphas = Parameter(
             (w13_input_scale * w13_weight_scale_2).to(torch.float32),
-            requires_grad=False,
-        )
+            requires_grad=False)
 
-        # GEMM 2
-        # TODO(shuw): check to use vector
-        w2_input_scale = layer.w2_input_scale
+        # This is for quantization, so we need to invert it.
+        layer.w13_input_scale_quant = Parameter(
+            (1 / w13_input_scale).to(torch.float32), requires_grad=False)
+
+        # GEMM 2 processing
+        w2_input_scale = layer.w2_input_scale.max().to(
+            torch.float32)  
         layer.g2_alphas = Parameter(
             (w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
-            requires_grad=False,
-        )
-         # This is for quantization, so we need to invert it.
+            requires_grad=False)
+
+        # This is for quantization, so we need to invert it.
         layer.w2_input_scale_quant = Parameter(
-            (1 / w2_input_scale).to(torch.float32), requires_grad=False
-        )
+            (1 / w2_input_scale).to(torch.float32), requires_grad=False)
 
-        # W2 weight and weight scales
-        assert (layer.w2_weight_scale.shape[2] % 16 == 0), (
-            "Expected weight_scale.dim(1) to be divisible by 16")
-        assert (layer.w2_weight_scale.dtype == torch.float8_e4m3fn), (
-            "Weight Blockscale must be represented as FP8-E4M3")
-        layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
-        layer.w2_weight_scale = Parameter(
-            layer.w2_weight_scale.data, requires_grad=False
-        )
-        # self.trtllm_gen_process_expert_w2_weight(layer)
-        # self.trtllm_gen_process_expert_w2_weight_scale_nvfp4(layer)
-        layer.g1_scale_c = Parameter(
-            (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
-            requires_grad=False,
-        )
+        # TensorRT-LLM specific processing
+        if self.allow_flashinfer and self.flashinfer_moe_backend == "TensorRT-LLM":
+            # Prepare static weights for TRT-LLM kernel
+            gemm1_weights_fp4_shuffled, \
+                gemm1_scales_fp4_shuffled, \
+                    gemm2_weights_fp4_shuffled, \
+                        gemm2_scales_fp4_shuffled = self.prepare_static_weights_for_kernel(
+                            layer.w13_weight, layer.w2_weight,
+                            layer.w13_weight_scale, layer.w2_weight_scale,
+                            layer.w2_weight.size(-2),  # hidden_size
+                            layer.w13_weight.size(-2) // 2,  # intermediate_size
+                            layer.w13_weight.size(0),  # num_experts
+                        )
+                        
+            layer.gemm1_weights_fp4_shuffled = Parameter(gemm1_weights_fp4_shuffled,
+                                                requires_grad=False)
+            layer.gemm2_weights_fp4_shuffled = Parameter(gemm2_weights_fp4_shuffled,
+                                                requires_grad=False)
+            layer.gemm1_scales_fp4_shuffled = Parameter(gemm1_scales_fp4_shuffled,
+                                            requires_grad=False)
+            layer.gemm2_scales_fp4_shuffled = Parameter(gemm2_scales_fp4_shuffled,
+                                            requires_grad=False)
+            
+            # Additional parameter needed for TRT-LLM
+            layer.g1_scale_c = Parameter(
+                (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
+                requires_grad=False,
+            )
+            
+            # Clean up weights that won't be used by TRT-LLM
+            del layer.w2_weight
+            del layer.w2_weight_scale
+            del layer.w13_weight
+            del layer.w13_weight_scale
+        else:
+            # Non-TRT-LLM processing (Cutlass or non-flashinfer)
+            assert (layer.w13_weight_scale.shape[2] % 16 == 0), (
+                "Expected weight_scale.dim(1) to be divisible by 16")
+            assert (layer.w13_weight_scale.dtype == torch.float8_e4m3fn), (
+                "Weight Blockscale must be represented as FP8-E4M3")
+            w13_blockscale_swizzled = self.swizzle_blockscale(
+                layer.w13_weight_scale)
+            layer.w13_blockscale_swizzled = Parameter(w13_blockscale_swizzled,
+                                                    requires_grad=False)
 
-        gemm1_weights_fp4_shuffled, \
-            gemm1_scales_fp4_shuffled, \
-                gemm2_weights_fp4_shuffled, \
-                    gemm2_scales_fp4_shuffled = self.prepare_static_weights_for_kernel(
-                                                    layer.w13_weight, layer.w2_weight,
-                                                    layer.w13_weight_scale, layer.w2_weight_scale,
-                                                    layer.w2_weight.size(-2), # hidden_size
-                                                    layer.w13_weight.size(-2) // 2, #intermediate_size
-                                                    layer.w13_weight.size(0), #num_experts,
-                                                )
-        
-        layer.gemm1_weights_fp4_shuffled = Parameter(gemm1_weights_fp4_shuffled,
-                                             requires_grad=False)
-        layer.gemm2_weights_fp4_shuffled = Parameter(gemm2_weights_fp4_shuffled,
-                                             requires_grad=False)
-        layer.gemm1_scales_fp4_shuffled = Parameter(gemm1_scales_fp4_shuffled,
-                                        requires_grad=False)
-        layer.gemm2_scales_fp4_shuffled = Parameter(gemm2_scales_fp4_shuffled,
-                                        requires_grad=False)        
-        del layer.w2_weight
-        del layer.w2_weight_scale
-        del layer.w13_weight
-        del layer.w13_weight_scale
+            assert (layer.w2_weight_scale.shape[2] % 16 == 0), (
+                "Expected weight_scale.dim(1) to be divisible by 16")
+            assert (layer.w2_weight_scale.dtype == torch.float8_e4m3fn), (
+                "Weight Blockscale must be represented as FP8-E4M3")
+            w2_blockscale_swizzled = self.swizzle_blockscale(layer.w2_weight_scale)
+            layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
+                                                    requires_grad=False)
+            layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
+
+        if self.use_marlin:
+            prepare_moe_fp4_layer_for_marlin(layer)
+            del layer.g1_alphas
+            del layer.g2_alphas
+            del layer.w13_input_scale_quant
+            del layer.w2_input_scale_quant
+            del layer.w13_blockscale_swizzled
+            del layer.w2_blockscale_swizzled
+
 
     def apply(
         self,
@@ -1559,10 +1656,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                     0, # local_expert_offset
                     256, #layer.w13_weight.shape[0], # loc_num_experts,
                     2.5, #layer.routed_scaling,
-                    8, #tile_tokens_dim,
+                    _get_tile_tokens_dim(x.shape[0], top_k, 256), #tile_tokens_dim,
                     flashinfer.RoutingMethodType.DeepSeekV3,
                     do_finalize=True,
                 )[0]
+                if x.dtype != torch.float16:
+                    out = out * (1./ 2.5) # to offset the multiply by routed_scaling_factor in deepseek_v2.py since this kernel already done it.
             elif self.flashinfer_moe_backend == "CUTLASS":
                 # TP or DP case
                 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
@@ -1616,3 +1715,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                  "'flashinfer_moe_high_throughput'.")
 
         return out
+
+def _get_tile_tokens_dim(num_tokens, top_k, num_experts):
+    # Guess tokens per expert assuming perfect expert distribution first.
+    num_tokens_per_expert = (num_tokens * top_k) // num_experts
+    # And pad the number to the next power of 2.
+    tile_tokens_dim = next_power_of_2(num_tokens_per_expert)
+    # Cap to 8-64 tokens per CTA tile as it's the range supported by the kernel.
+    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
+    return tile_tokens_dim
