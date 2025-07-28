@@ -15,6 +15,10 @@ from vllm.utils.flashinfer import (has_flashinfer_trtllm_fused_moe)#,
 
 logger = init_logger(__name__)
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> origin/trtllm-fp4
 def is_valid_flashinfer_trtllm_fused_moe(hidden_states: torch.Tensor,
                                          w1: torch.Tensor,
                                          w2: torch.Tensor) -> bool:
@@ -38,7 +42,10 @@ def is_valid_flashinfer_trtllm_fused_moe(hidden_states: torch.Tensor,
     return True
 
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/trtllm-fp4
 class FlashInferExpertsTRTLLM(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(

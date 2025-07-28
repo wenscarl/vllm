@@ -5,7 +5,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe, has_flashinfer_trtllm_fused_moe
-
 logger = init_logger(__name__)
 
 
