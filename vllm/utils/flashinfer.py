@@ -103,6 +103,7 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
         mod = _get_submodule(module_name)
         if not mod or not hasattr(mod, attr_name):
             return False
+
     return True
 
 

@@ -425,7 +425,7 @@ def _chunk_scales(scales: Optional[torch.Tensor], start: int,
 
 
 @final
-class FusedMoEModularKernel(torch.nn.Module):
+class FusedMoEModularKernelStage1(torch.nn.Module):
     """
     This class combines a FusedMoEPrepareAndFinalize instance and
     a FusedMoEPermuteExpertsUnpermute to provide an interface that
@@ -788,6 +788,23 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 extra_expert_args=extra_expert_args)
 
+        return output, fused_out, topk_weights, topk_ids
+
+
+@final
+class FusedMoEModularKernelStage2(torch.nn.Module):
+
+    def __init__(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        fused_experts: FusedMoEPermuteExpertsUnpermute,
+    ):
+        super().__init__()
+        self.prepare_finalize = prepare_finalize
+        self.fused_experts = fused_experts
+
+    def forward(self, output, fused_out, topk_weights, topk_ids,
+                apply_router_weight_on_input, extra_finalize_args):
         self.prepare_finalize.finalize(
             output, fused_out, topk_weights, topk_ids,
             apply_router_weight_on_input,
@@ -795,3 +812,58 @@ class FusedMoEModularKernel(torch.nn.Module):
             extra_finalize_args)
 
         return output
+
+
+@final
+class FusedMoEModularKernel(torch.nn.Module):
+    """
+    This class combines a FusedMoEPrepareAndFinalize instance and
+    a FusedMoEPermuteExpertsUnpermute to provide an interface that
+    is compatible with the `fused_experts` function in fused_moe.py.
+    It takes care of managing any required scratch space.
+    Note: Instances of this class should only be used for a single model
+    layer due to any layer specific state that may be used by the component
+    objects.
+    """
+
+    def __init__(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        fused_experts: FusedMoEPermuteExpertsUnpermute,
+    ):
+        super().__init__()
+        self.stage1 = FusedMoEModularKernelStage1(prepare_finalize,
+                                                  fused_experts)
+        self.stage2 = FusedMoEModularKernelStage2(prepare_finalize,
+                                                  fused_experts)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        inplace: bool = False,
+        activation: str = "silu",
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        w1_zp: Optional[torch.Tensor] = None,
+        w2_zp: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        extra_expert_args: Optional[dict] = None,
+        extra_prepare_args: Optional[dict] = None,
+        extra_finalize_args: Optional[dict] = None,
+    ) -> torch.Tensor:
+        return self.stage2(
+            *self.stage1(hidden_states, w1, w2, topk_weights, topk_ids,
+                         inplace, activation, global_num_experts, expert_map,
+                         w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
+                         apply_router_weight_on_input, extra_expert_args,
+                         extra_prepare_args, extra_finalize_args),
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            extra_finalize_args=extra_finalize_args)

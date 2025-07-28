@@ -95,6 +95,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """
         return False
 
+    def supports_pipelining(self) -> bool:
+        return False
+
     @staticmethod
     def maybe_make_prepare_finalize(
             moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
@@ -795,14 +798,16 @@ class FusedMoE(torch.nn.Module):
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or self.moe_parallel_config.use_flashinfer_cutlass_kernels):
+            batched_tensor_size = moe.max_num_tokens * (
+                2 if self.quant_method.supports_pipelining() else 1)
             self.batched_hidden_states = torch.zeros(
-                (moe.max_num_tokens, self.hidden_size),
+                (batched_tensor_size, self.hidden_size),
                 dtype=moe.in_dtype,
                 device=torch.cuda.current_device())
 
             # Note here we use `num_experts` which is logical expert count
             self.batched_router_logits = torch.zeros(
-                (moe.max_num_tokens, num_experts),
+                (batched_tensor_size, num_experts),
                 dtype=moe.in_dtype,
                 device=torch.cuda.current_device())
 
@@ -1417,7 +1422,61 @@ class FusedMoE(torch.nn.Module):
 
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
-        def process_chunk(chunk_start, chunk_end, skip_result_store=False):
+        base_quant_method_args = {
+            'layer': self,
+            'top_k': self.top_k,
+            'renormalize': self.renormalize,
+            'use_grouped_topk': self.use_grouped_topk,
+            'global_num_experts': self.global_num_experts,
+            'expert_map': self.expert_map,
+            'topk_group': self.topk_group,
+            'num_expert_group': self.num_expert_group,
+            'custom_routing_function': self.custom_routing_function,
+            'scoring_func': self.scoring_func,
+            'e_score_correction_bias': self.e_score_correction_bias,
+            'activation': self.activation,
+            'enable_eplb': self.enable_eplb,
+            'expert_load_view': self.expert_load_view,
+            'logical_to_physical_map': self.logical_to_physical_map,
+            'logical_replica_count': self.logical_replica_count,
+        }
+
+        def get_chunk_start(chunk_id):
+            return min(chunk_id * moe_dp_chunk_size_per_rank, num_tokens - 1)
+
+        def get_chunk_end(chunk_start):
+            return min(chunk_start + moe_dp_chunk_size_per_rank,
+                       min(max_tokens_across_dp, num_tokens))
+
+        def maybe_write_result(chunk_id, result):
+            chunk_start = get_chunk_start(chunk_id)
+            if chunk_start < num_tokens:
+                chunk_end = get_chunk_end(chunk_start)
+                full_final_hidden_states[chunk_start:chunk_end, :].copy_(
+                    result, non_blocking=True)
+
+        def get_staged_tensor_args(chunk_id):
+            chunk_start = get_chunk_start(chunk_id)
+            chunk_end = get_chunk_end(chunk_start)
+            chunk_size = chunk_end - chunk_start
+            if self.quant_method.supports_pipelining():
+                batch_start = chunk_id % 2 * self.moe_config.max_num_tokens
+            else:
+                batch_start = 0
+            batch_end = batch_start + chunk_size
+
+            staged_hidden_states = self.batched_hidden_states[
+                batch_start:batch_end, :]  # type: ignore
+            staged_router_logits = self.batched_router_logits[
+                batch_start:batch_end, :]  # type: ignore
+            return {
+                'x': staged_hidden_states,
+                'router_logits': staged_router_logits,
+            }
+
+        def process_chunk(chunk_id, num_chunks, partial_pipelined_result):
+            chunk_start = get_chunk_start(chunk_id)
+            chunk_end = get_chunk_end(chunk_start)
             chunk_size = chunk_end - chunk_start
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
@@ -1426,56 +1485,53 @@ class FusedMoE(torch.nn.Module):
                     >= chunk_size)
             assert (self.batched_router_logits.size(0)  # type: ignore
                     >= chunk_size)
-            staged_hidden_states = self.batched_hidden_states[:
-                                                              chunk_size, :]  # type: ignore
-            staged_router_logits = self.batched_router_logits[:
-                                                              chunk_size, :]  # type: ignore
-            staged_hidden_states.copy_(hidden_states, non_blocking=True)
-            staged_router_logits.copy_(router_logits, non_blocking=True)
 
-            # Matrix multiply.
-            final_hidden_states = self.quant_method.apply(
-                layer=self,
-                x=staged_hidden_states,
-                router_logits=staged_router_logits,
-                top_k=self.top_k,
-                renormalize=self.renormalize,
-                use_grouped_topk=self.use_grouped_topk,
-                global_num_experts=self.global_num_experts,
-                expert_map=self.expert_map,
-                topk_group=self.topk_group,
-                num_expert_group=self.num_expert_group,
-                custom_routing_function=self.custom_routing_function,
-                scoring_func=self.scoring_func,
-                e_score_correction_bias=self.e_score_correction_bias,
-                activation=self.activation,
-                enable_eplb=self.enable_eplb,
-                expert_load_view=self.expert_load_view,
-                logical_to_physical_map=self.logical_to_physical_map,
-                logical_replica_count=self.logical_replica_count,
-            )
+            staged_args = get_staged_tensor_args(chunk_id)
+            staged_args['x'].copy_(hidden_states, non_blocking=True)
+            staged_args['router_logits'].copy_(router_logits,
+                                               non_blocking=True)
 
-            if not skip_result_store:
-                full_final_hidden_states[chunk_start:chunk_end, :].copy_(
-                    final_hidden_states, non_blocking=True)
+            quant_method_args = base_quant_method_args | staged_args
+            if self.quant_method.supports_pipelining():
+                quant_method_args = quant_method_args | {
+                    'chunk_idx': chunk_id,
+                    'num_chunks': num_chunks,
+                    'previous_stage_out': partial_pipelined_result,
+                }
+                if num_chunks > 1:
+                    stage_1_out, final_hidden_states = self.quant_method.apply(
+                        **quant_method_args)
+                    if final_hidden_states is not None:
+                        maybe_write_result(chunk_id - 1, final_hidden_states)
+                    return stage_1_out
+
+            final_hidden_states = self.quant_method.apply(**quant_method_args)
+            maybe_write_result(chunk_id, final_hidden_states)
+            return None
 
         ctx = get_forward_context()
         # flashinfer_cutlass_kernels can handle: optional DP + TP/EP
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
         num_tokens = full_hidden_states.size(0)
-        for chunk_start_ in range(0, max_tokens_across_dp,
-                                  moe_dp_chunk_size_per_rank):
-            chunk_start = chunk_start_
-            chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
-                            max_tokens_across_dp)
-            # clamp start and end
-            chunk_start = min(chunk_start, num_tokens - 1)
-            chunk_end = min(chunk_end, num_tokens)
+        partial_pipelined_result = None
+        num_chunks = (max_tokens_across_dp + moe_dp_chunk_size_per_rank -
+                      1) // moe_dp_chunk_size_per_rank
+        for chunk_id in range(num_chunks):
+            partial_pipelined_result = process_chunk(chunk_id, num_chunks,
+                                                     partial_pipelined_result)
 
-            process_chunk(chunk_start,
-                          chunk_end,
-                          skip_result_store=chunk_start_ >= num_tokens)
+        if partial_pipelined_result is not None:
+            logger.warning("flushing pipeline")
+            quant_method_args = base_quant_method_args | get_staged_tensor_args(
+                num_chunks - 1)
+            _, final_hidden_states = self.quant_method.apply(
+                previous_stage_out=partial_pipelined_result,
+                chunk_idx=num_chunks - 1,
+                num_chunks=num_chunks,
+                **quant_method_args)
+            maybe_write_result(num_chunks - 1, final_hidden_states)
+            logger.warning("finished flushing")
 
         return full_final_hidden_states
 

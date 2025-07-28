@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -662,7 +663,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
-            return ModelOptNvFp4FusedMoE(self)
+            return ModelOptNvFp4FusedMoEPipelined(self)
         return None
 
 
@@ -1110,6 +1111,35 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             del layer.w13_blockscale_swizzled
             del layer.w2_blockscale_swizzled
 
+    def _get_tp_dp_cutlass_args(self, layer, x):
+        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+            is_valid_flashinfer_cutlass_fused_moe)
+        assert is_valid_flashinfer_cutlass_fused_moe(
+            x, layer.w13_weight,
+            layer.w2_weight), ("Flashinfer CUTLASS Fused MoE not applicable!")
+
+        a1_gscale = torch.min(layer.w13_input_scale_quant)
+        a2_gscale = torch.min(layer.w2_input_scale_quant)
+        extra_expert_args = {
+            'g1_alphas': layer.g1_alphas,
+            'g2_alphas': layer.g2_alphas,
+            'out_dtype': x.dtype,
+            # Avoid confusion with a1_scale and a2_scale
+            # where are batch size related.
+            'a1_gscale': a1_gscale,
+            'a2_gscale': a2_gscale,
+        }
+        extra_prepare_args = {
+            'use_dp': layer.dp_size > 1,
+            'local_tokens': x.shape[0],
+            'a1_gscale': a1_gscale,
+        }
+        extra_finalize_args = {
+            'use_dp': layer.dp_size > 1,
+            'local_tokens': x.shape[0],
+        }
+        return extra_expert_args, extra_prepare_args, extra_finalize_args
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -1192,32 +1222,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
             # TP or DP case
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-                is_valid_flashinfer_cutlass_fused_moe)
-            assert is_valid_flashinfer_cutlass_fused_moe(
-                x, layer.w13_weight, layer.w2_weight), (
-                    "Flashinfer CUTLASS Fused MoE not applicable!")
-
-            a1_gscale = layer.w13_input_scale_quant
-            a2_gscale = layer.w2_input_scale_quant
-            extra_expert_args = {
-                'g1_alphas': layer.g1_alphas,
-                'g2_alphas': layer.g2_alphas,
-                'out_dtype': x.dtype,
-                # Avoid confusion with a1_scale and a2_scale
-                # where are batch size related.
-                'a1_gscale': a1_gscale,
-                'a2_gscale': a2_gscale,
-            }
-            extra_prepare_args = {
-                'use_dp': layer.dp_size > 1,
-                'local_tokens': x.shape[0],
-                'a1_gscale': a1_gscale,
-            }
-            extra_finalize_args = {
-                'use_dp': layer.dp_size > 1,
-                'local_tokens': x.shape[0],
-            }
+            extra_expert_args, extra_prepare_args, extra_finalize_args = \
+                self._get_tp_dp_cutlass_args(layer, x)
 
             out = self.fused_experts(
                 hidden_states=x,
@@ -1237,3 +1243,114 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 extra_finalize_args=extra_finalize_args,
             )
         return out
+
+
+class ModelOptNvFp4FusedMoEPipelined(ModelOptNvFp4FusedMoE):
+
+    def __init__(self, quant_config: ModelOptNvFp4Config):
+        super().__init__(quant_config)
+        self._aux_stream = torch.cuda.Stream()
+        self._start_event = torch.cuda.Event()
+        self._done_event = torch.cuda.Event()
+
+    def supports_pipelining(self):
+        return not self.use_marlin and self.fused_experts is not None
+
+    def _aux_stream_ctx(self):
+        return torch.cuda.stream(self._aux_stream)
+
+    def _stage1_stream_ctx(self, chunk_idx):
+        return nullcontext() if chunk_idx % 2 == 0 else self._aux_stream_ctx()
+
+    def _stage2_stream_ctx(self, chunk_idx):
+        return self._stage1_stream_ctx(chunk_idx + 1)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        previous_stage_out,
+        chunk_idx: int,
+        num_chunks: int,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ):
+        if not self.supports_pipelining() or num_chunks == 1:
+            return super().apply(
+                layer, x, router_logits, top_k, renormalize, use_grouped_topk,
+                topk_group, num_expert_group, global_num_experts, expert_map,
+                custom_routing_function, scoring_func, e_score_correction_bias,
+                apply_router_weight_on_input, activation, enable_eplb,
+                expert_load_view, logical_to_physical_map,
+                logical_replica_count)
+
+        if previous_stage_out is None:
+            self._start_event.record()
+            with self._aux_stream_ctx():
+                self._start_event.wait()
+
+        extra_expert_args, extra_prepare_args, extra_finalize_args = \
+                self._get_tp_dp_cutlass_args(layer, x)
+        stage_1_out = None
+        if chunk_idx < num_chunks - 1:
+            with self._stage1_stream_ctx(chunk_idx):
+                topk_weights, topk_ids = FusedMoE.select_experts(
+                    hidden_states=x,
+                    router_logits=router_logits,
+                    use_grouped_topk=use_grouped_topk,
+                    top_k=top_k,
+                    renormalize=renormalize,
+                    topk_group=topk_group,
+                    num_expert_group=num_expert_group,
+                    custom_routing_function=custom_routing_function,
+                    scoring_func=scoring_func,
+                    e_score_correction_bias=e_score_correction_bias)
+                stage_1_out = self.fused_experts.stage1(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    inplace=
+                    False,  # TODO(shuw): fix later, now output is high prec
+                    activation=activation,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    w1_scale=layer.w13_blockscale_swizzled,
+                    w2_scale=layer.w2_blockscale_swizzled,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    extra_expert_args=extra_expert_args,
+                    extra_prepare_args=extra_prepare_args,
+                    extra_finalize_args=extra_finalize_args,
+                )[0:2]
+                # shapes = [(s.shape, s.data_ptr) for s in stage_1_out]
+                # logger.warning(f's1 out {shapes}')
+
+        stage_2_out = None
+        if previous_stage_out:
+            with self._stage2_stream_ctx(chunk_idx):
+                stage_2_out = self.fused_experts.stage2(
+                    *previous_stage_out, None, None,
+                    apply_router_weight_on_input, extra_finalize_args)
+
+        if chunk_idx == num_chunks - 1:
+            with self._aux_stream_ctx():
+                self._done_event.record()
+            self._done_event.wait()
+
+        return stage_1_out, stage_2_out
