@@ -4,7 +4,7 @@
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe, has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
@@ -30,3 +30,4 @@ def is_valid_flashinfer_cutlass_fused_moe(hidden_states: torch.Tensor,
             f"float32, float16, or bfloat16 (got {hidden_states.dtype}).")
         return False
     return True
+

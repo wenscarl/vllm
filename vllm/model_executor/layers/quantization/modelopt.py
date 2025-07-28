@@ -1139,6 +1139,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         intermediate_size,
         num_experts,
     ):
+        print("gemm1_weights.shape:", gemm1_weights.shape)
+        print("gemm2_weights.shape:", gemm2_weights.shape)
+        print("gemm1_scales_linear_fp4_bytes.shape:", gemm1_scales_linear_fp4_bytes.shape)
+        print("gemm2_scales_linear_fp4_bytes.shape:", gemm2_scales_linear_fp4_bytes.shape)
+        print("hidden_size:", hidden_size)
+        print("intermediate_size:", intermediate_size)
+        print("num_experts:", num_experts)
         from flashinfer import (
             reorder_rows_for_gated_act_gemm,
             shuffle_matrix_a,
@@ -1561,14 +1568,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 print("router_logits.shape:", router_logits.shape)
                 print("e_score_correction_bias.shape:", e_score_correction_bias.shape)
                 print("hidden_states_fp4.shape:", hidden_states_fp4.shape)
-                print("hidden_states_scale_linear_fp4.shape:", hidden_states_scale_linear_fp4.shape)
-                print("layer.gemm1_weights_fp4_shuffled.shape:", layer.gemm1_weights_fp4_shuffled.shape)
-                print("layer.gemm1_scales_fp4_shuffled.shape:", layer.gemm1_scales_fp4_shuffled.shape)
-                print("layer.gemm2_weights_fp4_shuffled.shape:", layer.gemm2_weights_fp4_shuffled.shape)
-                print("layer.gemm2_scales_fp4_shuffled.shape:", layer.gemm2_scales_fp4_shuffled.shape)
-                print("layer.g1_scale_c.shape:", layer.g1_scale_c.shape)
-                print("layer.g1_alphas.shape:", layer.g1_alphas.shape)
-                print("layer.g2_alphas.shape:", layer.g2_alphas.shape)
+                print("hidden_states_scale_linear_fp4.view(torch.float8_e4m3fn).flatten().shape:", hidden_states_scale_linear_fp4.view(torch.float8_e4m3fn).flatten().shape)
+                print("layer.gemm1_weights_fp4_shuffled.data.shape:", layer.gemm1_weights_fp4_shuffled.data.shape)
+                print("layer.gemm1_scales_fp4_shuffled.data.view(torch.float8_e4m3fn).shape:", layer.gemm1_scales_fp4_shuffled.data.view(torch.float8_e4m3fn).shape)
+                print("layer.gemm2_weights_fp4_shuffled.data.shape:", layer.gemm2_weights_fp4_shuffled.data.shape)
+                print("layer.gemm2_scales_fp4_shuffled.data.view(torch.float8_e4m3fn).shape:", layer.gemm2_scales_fp4_shuffled.data.view(torch.float8_e4m3fn).shape)
 
 
                 out = fused_moe.trtllm_fp4_block_scale_moe(
@@ -1583,14 +1587,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                     layer.g1_scale_c.data,
                     layer.g1_alphas.data,
                     layer.g2_alphas.data,
-                    num_experts=256, #layer.w13_weight.shape[0], #num_experts,
+                    num_experts=layer.n_local_physical_experts, #layer.w13_weight.shape[0], #num_experts,
                     top_k=top_k,
                     n_group=8, #layer.n_group,
                     topk_group=4, #layer.top_k_group,
                     intermediate_size=2048, #layer.w13_weight.shape[1] // 2, # imm
                     local_expert_offset=0, # local_expert_offset
-                    local_num_experts=256, #layer.w13_weight.shape[0], # loc_num_experts,
-                    routed_scaling_factor=2.5, #layer.routed_scaling,
+                    local_num_experts=64, #layer.w13_weight.shape[0], # loc_num_experts,
+                    routed_scaling_factor=None,
                     tile_tokens_dim=8, #tile_tokens_dim,
                     routing_method_type=flashinfer.RoutingMethodType.DeepSeekV3,
                     do_finalize=True,
