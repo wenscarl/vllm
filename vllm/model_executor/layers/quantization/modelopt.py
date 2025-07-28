@@ -1607,18 +1607,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                     output1_scale_scalar=layer.g1_scale_c.data,
                     output1_scale_gate_scalar=layer.g1_alphas.data,
                     output2_scale_scalar=layer.g2_alphas.data,
-                    num_experts=global_num_experts, #layer.w13_weight.shape[0], #num_experts,
+                    num_experts=global_num_experts, 
                     top_k=top_k,
-                    n_group=num_expert_group, #layer.n_group,
-                    topk_group=topk_group, #layer.top_k_group,
-                    intermediate_size=layer.intermediate_size_per_partition, #layer.w13_weight.shape[1] // 2, # imm
-                    local_expert_offset=layer.ep_rank * layer.local_num_experts, # local_expert_offset
-                    local_num_experts=layer.local_num_experts, #layer.w13_weight.shape[0], # loc_num_experts,
-                    routed_scaling_factor=routed_scaling_factor, #layer.routed_scaling,
-                    tile_tokens_dim=_get_tile_tokens_dim(x.shape[0], top_k, layer.local_num_experts), #tile_tokens_dim,
+                    n_group=num_expert_group,
+                    topk_group=topk_group,
+                    intermediate_size=layer.intermediate_size_per_partition,
+                    local_expert_offset=layer.ep_rank * layer.local_num_experts,
+                    local_num_experts=layer.local_num_experts,
+                    routed_scaling_factor=routed_scaling_factor,
+                    tile_tokens_dim=_get_tile_tokens_dim(x.shape[0], top_k, layer.local_num_experts),
                     routing_method_type=flashinfer.RoutingMethodType.DeepSeekV3,
                     do_finalize=True,
                 )[0]
+                # to offset the multiply by routed_scaling_factor in deepseek_v2.py since this kernel already done it.
                 if x.dtype != torch.float16:
                     out = out * (1./ routed_scaling_factor) # to offset the multiply by routed_scaling_factor in deepseek_v2.py since this kernel already done it.
             elif self.flashinfer_moe_backend == "CUTLASS":
