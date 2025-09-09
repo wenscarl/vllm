@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -20,12 +20,7 @@ if has_flashinfer_all2all():
 
 logger = init_logger(__name__)
 
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-else:
-    FusedMoE = None
 
-use_ag_rs = False
 class NaiveAll2AllManager(All2AllManagerBase):
     """
     A naive implementation of all2all communication.

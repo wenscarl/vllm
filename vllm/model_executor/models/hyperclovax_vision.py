@@ -33,12 +33,13 @@ from vllm.inputs import InputProcessingContext
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement, PromptUpdate)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
@@ -367,7 +368,7 @@ def _build_hcxvision_hf_processor(
     info: HCXVisionProcessingInfo,
     dummy_inputs: BaseDummyInputsBuilder[HCXVisionProcessingInfo],
     *,
-    cache: Optional[ProcessingCache] = None,
+    cache: Optional[BaseMultiModalProcessorCache] = None,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, HCXVisionProcessingInfo):
         return HCXVisionMultiModalProcessor(
@@ -929,8 +930,8 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 target_group_size = 0
 
             elif video_group_size < target_group_size:
-                raise RuntimeError(f"video_group_size < target_group_size!! \
-                        [{video_group_size} < {target_group_size}]")
+                raise RuntimeError(
+                    f"{video_group_size=} < {target_group_size=}")
 
         assert len(target_features
                    ) == 0, f"target_features is not empty!! {target_features}"
@@ -1114,9 +1115,8 @@ def reshape_and_unpad_image_features(
     base_image_feature = image_feature[0]
     image_feature = image_feature[1:]
 
-    assert (height * width == base_image_feature.shape[0]
-            ), f"height: {height}, width: {width}, \
-        base_image_feature.shape[0]: {base_image_feature.shape[0]}"
+    assert height * width == base_image_feature.shape[0], (
+        f"{height=} * {width=} != {base_image_feature.shape[0]=}")
 
     num_patch_width, num_patch_height = get_anyres_image_grid_shape(
         image_size, possible_resolutions, grid_size)
