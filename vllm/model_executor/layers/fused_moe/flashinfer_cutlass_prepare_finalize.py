@@ -20,19 +20,17 @@ from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
-class BaseFlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """Base class for FlashInfer MoE prepare and finalize operations."""
     
     def __init__(
         self,
         use_dp: bool,
-        a1_gscale: Optional[torch.Tensor],
         num_dispatchers: int = 1,
     ):
         super().__init__()
         self.num_dispatchers_ = num_dispatchers
         self.use_dp = use_dp
-        self.a1_gscale = a1_gscale
         self.local_tokens = None
 
     @property
@@ -62,7 +60,7 @@ class BaseFlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1.mul_(topk_weights.to(a1.dtype))
 
 
-class FlashInferAllToAllMoEPrepareAndFinalize(BaseFlashInferCutlassMoEPrepareAndFinalize):
+class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize):
     """FlashInfer implementation using AllToAll communication."""
     
     def __init__(
@@ -82,8 +80,6 @@ class FlashInferAllToAllMoEPrepareAndFinalize(BaseFlashInferCutlassMoEPrepareAnd
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -134,6 +130,15 @@ class FlashInferAllToAllMoEPrepareAndFinalize(BaseFlashInferCutlassMoEPrepareAnd
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
 
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1,
+            quant_config.a1_gscale,
+            quant_config.quant_dtype,
+            quant_config.per_act_token_quant,
+            quant_config.block_shape,
+            # Swizzling after communication
+            is_fp4_scale_swizzled=not self.use_dp,
+        )
         if self.use_dp:
             top_k = topk_ids.size(1)
             token_count = output.shape[0]
@@ -147,16 +152,13 @@ class FlashInferAllToAllMoEPrepareAndFinalize(BaseFlashInferCutlassMoEPrepareAnd
         output.copy_(fused_expert_output)
 
 
-class FlashInferFP4AllGatherMoEPrepareAndFinalize(BaseFlashInferCutlassMoEPrepareAndFinalize):
-    """FlashInfer implementation using FP4 AllGather communication."""
-    
+class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize):    
     def __init__(
         self,
         use_dp: bool,
-        a1_gscale: Optional[torch.Tensor],
         num_dispatchers: int = 1,
     ):
-        super().__init__(use_dp, a1_gscale, num_dispatchers)
+        super().__init__(use_dp, num_dispatchers)
 
     def prepare(
         self,
@@ -177,7 +179,7 @@ class FlashInferFP4AllGatherMoEPrepareAndFinalize(BaseFlashInferCutlassMoEPrepar
             # Non-DP case: standard quantization
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
-                self.a1_gscale,
+                quant_config.a1_gscale,
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
@@ -188,7 +190,7 @@ class FlashInferFP4AllGatherMoEPrepareAndFinalize(BaseFlashInferCutlassMoEPrepar
             # delay swizzle to after comm
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
-                self.a1_gscale,
+                quant_config.a1_gscale,
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
@@ -221,18 +223,16 @@ class FlashInferFP4AllGatherMoEPrepareAndFinalize(BaseFlashInferCutlassMoEPrepar
         output.copy_(fused_expert_output)
 
 
-def build_flashinfer_prepare_finalize(
+def create_flashinfer_prepare_finalize(
     use_dp: bool,
-    a1_gscale: Optional[torch.Tensor],
-    enable_alltoallv: bool = False,
-    num_dispatchers: int = 1,
-) -> BaseFlashInferCutlassMoEPrepareAndFinalize:
+    use_nvfp4: bool=False,
+    enable_alltoallv: bool=False,
+) -> FlashInferCutlassMoEPrepareAndFinalize:
     """Factory function to create the appropriate FlashInfer implementation."""
-    if enable_alltoallv:
-        return FlashInferAllToAllMoEPrepareAndFinalize(
-            use_dp, a1_gscale, num_dispatchers
-        )
-    else:
-        return FlashInferFP4AllGatherMoEPrepareAndFinalize(
-            use_dp, a1_gscale, num_dispatchers
-        )
+    if use_nvfp4:
+        if enable_alltoallv:
+            return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
+        else:
+            return FlashInferAllGatherMoEPrepareAndFinalize(use_dp)
+    # Fp8 only supports AllGather
+    return FlashInferAllGatherMoEPrepareAndFinalize(use_dp)

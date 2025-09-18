@@ -75,6 +75,44 @@ class NaiveAll2AllManager(All2AllManagerBase):
         pass
 
 
+class AgRsAll2AllManager(All2AllManagerBase):
+    """
+    An implementation of all2all communication based on
+    all-gather (dispatch) and reduce-scatter (combine).
+    """
+
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
+
+    def dispatch(self, hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor):
+        """
+        Gather hidden_states and router_logits from all dp ranks.
+        """
+        sizes = get_forward_context(
+        ).dp_metadata.get_chunk_sizes_across_dp_rank()
+        hidden_states, router_logits = get_dp_group().all_gatherv(
+            [hidden_states, router_logits],
+            dim=0,
+            sizes=sizes,
+        )
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Reduce-scatter hidden_states across all dp ranks.
+        """
+        sizes = get_forward_context(
+        ).dp_metadata.get_chunk_sizes_across_dp_rank()
+        hidden_states = get_dp_group().reduce_scatterv(hidden_states,
+                                                       dim=0,
+                                                       sizes=sizes)
+        return hidden_states
+
+    def destroy(self):
+        pass
+
+
 class PPLXAll2AllManager(All2AllManagerBase):
     """
     All2All communication based on PPLX kernels.
@@ -257,11 +295,6 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
-        # It is dangerous to set num sms outside this function. num_sms is not
-        # a part of the hash-key that identifies this object. If we are in a
-        # situation where we make objects with different num_sms, the hash key
-        # in get_or_create must be updated.
-        handle.set_num_sms(self.num_sms)
         return handle
 
 
