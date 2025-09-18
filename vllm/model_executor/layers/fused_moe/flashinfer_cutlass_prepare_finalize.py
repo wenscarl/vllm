@@ -17,19 +17,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
-def get_global_num_tokens_cpu():
-    cu_sizes = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
-    sizes = [cu_sizes[0].item()]
-    for i in range(1, len(cu_sizes)):
-        sizes.append((cu_sizes[i] - cu_sizes[i - 1]).item())
-    return sizes
-
-
 def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
-
-enable_flashinfer_alltoall = envs.VLLM_ALL2ALL_BACKEND == "flashinfer"
+enable_flashinfer_alltoall = envs.VLLM_ALL2ALL_BACKEND == "flashinfer_all2allv"
 enable_flashinfer_fp4_allgather = not enable_flashinfer_alltoall
 
 
@@ -47,6 +38,11 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.a1_gscale = a1_gscale
         self.local_tokens = None
         self.alltoall_info = None
+
+        self.all2all_manager = None
+        if self.use_dp and enable_flashinfer_alltoall:
+            self.all2all_manager = get_ep_group().device_communicator.all2all_manager
+
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -97,11 +93,9 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 global_num_tokens_cpu = get_local_sizes()
                 top_k = topk_ids.size(1)
 
-                all2all_manager = get_ep_group(
-                ).device_communicator.all2all_manager
                 (alltoall_info, topk_ids, topk_weights, a1q,
                  a1q_scale) = flashinfer_alltoall_dispatch(
-                     all2all_manager,
+                     self.all2all_manager,
                      global_num_tokens_cpu,
                      a1,
                      self.a1_gscale,
@@ -144,23 +138,18 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             if enable_flashinfer_fp4_allgather:
                 fused_expert_output = get_dp_group().reduce_scatterv(
                     fused_expert_output, dim=0, sizes=get_local_sizes())
-                output.copy_(fused_expert_output)
 
             if enable_flashinfer_alltoall:
-                all2all_manager = get_ep_group(
-                ).device_communicator.all2all_manager
                 top_k = topk_ids.size(1)
                 token_count = output.shape[0]
                 fused_expert_output = flashinfer_alltoall_combine(
-                    all2all_manager,
+                    self.all2all_manager,
                     fused_expert_output,
                     top_k=top_k,
                     token_count=token_count,
                     alltoall_info=self.alltoall_info,
                 )
-                output.copy_(fused_expert_output)
-        else:
-            output.copy_(fused_expert_output)
+        output.copy_(fused_expert_output)
 
 
 def flashinfer_alltoall_dispatch(

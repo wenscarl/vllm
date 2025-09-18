@@ -54,35 +54,21 @@ class NaiveAll2AllManager(All2AllManagerBase):
                  router_logits: torch.Tensor):
         cu_tokens_across_dp_cpu = get_forward_context(
         ).dp_metadata.cu_tokens_across_dp_cpu
-        if not use_ag_rs:
-            hidden_states = self.naive_multicast(hidden_states,
-                                                cu_tokens_across_dp_cpu)
-            router_logits = self.naive_multicast(router_logits,
-                                                cu_tokens_across_dp_cpu)
-        else:
-            sizes = get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
-
-            hidden_states, router_logits = get_dp_group().all_gatherv(
-                [hidden_states, router_logits],
-                dim=0,
-                sizes=sizes,
-            )
+        sizes = get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
+        hidden_states, router_logits = get_dp_group().all_gatherv(
+            [hidden_states, router_logits],
+            dim=0,
+            sizes=sizes,
+        )
 
         return hidden_states, router_logits
 
     def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
         cu_tokens_across_dp_cpu = get_forward_context(
         ).dp_metadata.cu_tokens_across_dp_cpu
-        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.dp_rank]
-        if not use_ag_rs:
-            all_hidden_states = self.dp_group.all_reduce(hidden_states)
-            hidden_states = all_hidden_states[start:end, :]
-        else:
-            sizes = get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
-            hidden_states = get_dp_group().reduce_scatterv(
-                    hidden_states, dim=0, sizes=sizes)
+        sizes = get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
+        hidden_states = get_dp_group().reduce_scatterv(
+                hidden_states, dim=0, sizes=sizes)
         return hidden_states
 
     def destroy(self):
