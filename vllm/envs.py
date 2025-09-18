@@ -152,7 +152,8 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
                                   "deepep_high_throughput",
                                   "deepep_low_latency",
-                                  "allgather_reducescatter"] = \
+                                  "allgather_reducescatter",
+                                  "flashinfer_all2allv"] = \
                                   "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
@@ -1139,7 +1140,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
                      ["naive", "pplx",
                      "deepep_high_throughput",
                      "deepep_low_latency",
-                     "allgather_reducescatter"]),
+                     "allgather_reducescatter",
+                     "flashinfer_all2allv"]),
 
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
