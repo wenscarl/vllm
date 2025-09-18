@@ -8,7 +8,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    FlashInferCutlassMoEPrepareAndFinalize)
+    build_flashinfer_prepare_finalize)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.utils.flashinfer import (flashinfer_cutlass_fused_moe,
@@ -214,10 +214,13 @@ def flashinfer_cutlass_moe_fp4(
     expert_map: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
-
+    prepare_finalize = build_flashinfer_prepare_finalize(
+        use_dp=False,
+        a1_gscale=a1_gscale,
+        enable_alltoallv = envs.VLLM_ALL2ALL_BACKEND == "flashinfer_all2allv",
+    )
     fused_experts = mk.FusedMoEModularKernel(
-        FlashInferCutlassMoEPrepareAndFinalize(use_dp=False,
-                                               a1_gscale=a1_gscale),
+        prepare_finalize,
         FlashInferExperts(
             g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,
