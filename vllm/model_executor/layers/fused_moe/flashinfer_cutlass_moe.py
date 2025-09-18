@@ -108,7 +108,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
           of each tuple must be the number of tokens.
         """
         aq_m, aq_n = aq.shape
-        workspace2 = ()
+        workspace2 = (0,)
         output_shape = (aq_m, aq_n * 2) if self.quant_dtype != \
             torch.float8_e4m3fn else (aq_m, aq_n)
         workspace_dtype = a.dtype
