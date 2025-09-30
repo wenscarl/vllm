@@ -16,10 +16,14 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize)
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.flashinfer import (
+    has_flashinfer_cutlass_fused_moe,
+    has_flashinfer_cutedsl_grouped_gemm_nt_masked
+)
 
 __all__ = [
     "is_flashinfer_fp4_cutlass_moe_available",
+    "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
     "build_flashinfer_fp4_cutlass_moe_prepare_finalize",
 ]
@@ -29,6 +33,13 @@ def is_flashinfer_fp4_cutlass_moe_available() -> bool:
     """Return ``True`` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
     return (envs.VLLM_USE_FLASHINFER_MOE_FP4
             and has_flashinfer_cutlass_fused_moe()
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability(100))
+
+def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
+    """Return ``True`` when FlashInfer CUTEDSL NV-FP4 kernels can be used."""
+    return (envs.VLLM_USE_FLASHINFER_MOE_FP4
+            and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
             and current_platform.is_cuda()
             and current_platform.is_device_capability(100))
 

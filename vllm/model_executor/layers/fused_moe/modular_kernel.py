@@ -910,7 +910,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
             assert not dbo_enabled()
-
+            print('xx'*100)
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = self.prepare_finalize.prepare(
                  a1,
@@ -922,6 +922,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                  self.fused_experts.quant_config,
              )
         else:
+            print('yy'*100)
             # Overlap shared expert compute with all2all dispatch.
             dbo_maybe_run_recv_hook()
             prepare_ret = self.prepare_finalize.prepare_async(

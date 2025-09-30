@@ -56,8 +56,8 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def activation_formats(
         self
     ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (mk.FusedMoEActivationFormat.Standard,
-                mk.FusedMoEActivationFormat.Standard)
+        return (mk.FusedMoEActivationFormat.BatchedExperts,
+                mk.FusedMoEActivationFormat.BatchedExperts)
 
     def supports_expert_map(self) -> bool:
         return False
@@ -99,6 +99,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
+        print(f"in flashinfer_cutedsl_moe workspace_shapes, a.shape = {a.shape}, aq = {aq}")  # noqa: E501
         assert a.ndim == 3
         # assert aq is None
         workspace2 = ()
