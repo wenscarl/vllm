@@ -1454,10 +1454,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
             if use_llama4_routing:
                 routing_method_type = flashinfer.RoutingMethodType.Llama4
+            routing_bias = e_score_correction_bias
+            if routing_bias is not None:
+                routing_bias = routing_bias.to(torch.bfloat16)
             out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
                 routing_logits=router_logits
                 if use_llama4_routing else router_logits.to(torch.float32),
-                routing_bias=e_score_correction_bias,
+                routing_bias=routing_bias,
                 hidden_states=hidden_states_fp4,
                 hidden_states_scale=hidden_states_scale_linear_fp4.view(
                     torch.float8_e4m3fn).flatten(),
@@ -1532,8 +1535,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 workspace=layer.workspace)
 
         elif self.fused_experts is not None:
-            assert self.allow_flashinfer and \
-               self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+            assert self.allow_flashinfer
+            assert self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS or self.flashinfer_moe_backend == FlashinferMoeBackend.CUTEDSL
 
             assert is_valid_flashinfer_cutlass_fused_moe(
                 x, layer.w13_weight, layer.w2_weight), (
@@ -1551,6 +1554,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+
         elif (self.allow_flashinfer
               and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
