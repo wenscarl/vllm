@@ -190,7 +190,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
-
+        print(f"deepll: receiver_ expert_x:{expert_x.shape}")
         return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
     def prepare(
@@ -236,6 +236,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
+        # print("xxx"*100, fused_expert_output.shape)
+        # print("ttt"*100, fused_expert_output.dtype)
         _, _, recv_hook = self.buffer.low_latency_combine(
             fused_expert_output,
             topk_ids,
