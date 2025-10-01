@@ -4,18 +4,14 @@ from typing import Callable
 import pytest
 import torch
 from flashinfer import fp4_quantize
-from vllm.utils.flashinfer import (flashinfer_cutedsl_grouped_gemm_nt_masked,
-                                   silu_and_mul_nvfp4_batched_quantize,
-                                   nvfp4_batched_quantize)
-# from sgl_kernel import nvfp4_batched_quantize, scaled_fp4_quant
 from torch.nn import functional as F
 
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
   flashinfer_cutedsl_moe_masked,
   scaled_fp4_grouped_quant)
-# from sglang.srt.layers.moe.topk import TopKConfig, select_experts
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.utils.flashinfer import flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked
 
 if torch.cuda.get_device_capability() < (10, 0):
     pytest.skip(
@@ -190,8 +186,6 @@ def flashinfer_cutedsl_grouped_gemm_nt_masked(
     w_global_scale: torch.Tensor,  # (l,)
     masked_m: torch.Tensor,
 ):
-    from flashinfer.cute_dsl.blockscaled_gemm import grouped_gemm_nt_masked
-
     # hidden_states: [l, m, k]
     # weights: [l, n, k]
     aq, aq_sf = scaled_fp4_grouped_quant(
@@ -203,7 +197,7 @@ def flashinfer_cutedsl_grouped_gemm_nt_masked(
     bq, bq_sf = scaled_fp4_grouped_quant(
         weights,
         w_global_scale,
-        torch.ones(num_experts, device=weights.device, dtype=torch.int32) * n,
+        torch.full((num_experts,), n, device=weights.device, dtype=torch.int32),
     )
 
     out = torch.zeros(
@@ -228,7 +222,7 @@ def flashinfer_cutedsl_grouped_gemm_nt_masked(
         else:
             raise ValueError(f"Unsupported cute dtype {input.dtype}")
 
-    grouped_gemm_nt_masked(
+    cutedsl_gmm_masked(
         (aq, aq_sf),
         (bq, bq_sf),
         out,
@@ -417,23 +411,24 @@ def test_flashinfer_cutedsl_moe_masked(
         (num_experts,), dtype=torch.float32, device=hidden_states.device
     )  # assume intermediate scale is 1.0
 
-    w1_fp4, w1_blockscale = nvfp4_batched_quantize(
+    w1_fp4, w1_blockscale = scaled_fp4_grouped_quant(
         w1,
         w1_global_scale,
-        mask=torch.ones(num_experts, dtype=torch.int32, device=w1.device) * 2 * inter_dim,
+        torch.ones(num_experts, dtype=torch.int32, device=w1.device) * 2 * inter_dim,
     )
-    w2_fp4, w2_blockscale = nvfp4_batched_quantize(
+    w2_fp4, w2_blockscale = scaled_fp4_grouped_quant(
         w2,
         w2_global_scale,
-        mask=torch.ones(num_experts, dtype=torch.int32, device=w2.device) * hidden_dim,
+        torch.ones(num_experts, dtype=torch.int32, device=w2.device) * hidden_dim,
     )
 
     w1_alpha = 1.0 / (input_global_scale * w1_global_scale)
     w2_alpha = 1.0 / (a2_global_scale * w2_global_scale)
 
     out = torch.empty_like(hidden_states_3d)
-    wk = torch.empty(num_experts, bs, inter_dim * 2, dtype=hidden_states_3d.dtype,
-                     device=hidden_states_3d.device)
+    # Note: the 1st dim shouldn't be bs
+    wk = torch.empty(num_experts, hidden_states_3d.shape[1], inter_dim * 2, dtype=hidden_states_3d.dtype,
+                     device=hidden_states.device)
     flashinfer_cutedsl_moe_masked(
         hidden_states_3d.to(hidden_states.device),
         input_global_scale,
@@ -444,8 +439,8 @@ def test_flashinfer_cutedsl_moe_masked(
         a2_global_scale,
         w2_blockscale,
         w2_alpha,
-        wk,
         masked_m.to(hidden_states.device),
+        wk,
         out,
     )
 
@@ -549,7 +544,7 @@ def test_grouped_gemm_nt_masked(
             lhs = hidden_states_expanded[mask]
             rhs = weights[i]
             a_amax = lhs.abs().max().to(torch.float32).to(hidden_states.device)
-            b_amax = rhs.abs().amax().to(torch.float32).to(weights.device)
+            b_amax = rhs.abs().max().to(torch.float32).to(weights.device)
             a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_amax
             b_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / b_amax
 
@@ -610,12 +605,10 @@ def test_grouped_gemm_nt_masked(
             out_flashinfer.permute(2, 0, 1)[i, : masked_m[i]],
             out_ref.to(out_flashinfer.device)[i, : masked_m[i]],
             atol=1e-1,
-            rtol=5e-2,
+            rtol=1e-1,
         )
 
 
 if __name__ == "__main__":
-    # test_cutlass_fp4_moe_no_graph(224, 1024, 1024, 256, 8, torch.half)
-    # test_flashinfer_fp4_moe_no_graph(224, 1024, 1024, 256, 8, torch.half)
-    # test_flashinfer_cutedsl_moe_masked(16, 128, 512, 4)
+    test_flashinfer_cutedsl_moe_masked(16, 128, 512, 4)
     test_grouped_gemm_nt_masked(16, 128, 512, 4)

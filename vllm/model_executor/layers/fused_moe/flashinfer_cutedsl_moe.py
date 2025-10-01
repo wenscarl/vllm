@@ -177,55 +177,71 @@ def get_cute_dtype(input: torch.Tensor) -> str:
     else:
         raise ValueError(f"Unsupported cute dtype {input.dtype}")
 
-
 def scaled_fp4_grouped_quant(
     input_tensor: torch.Tensor,
     input_global_scale: torch.Tensor,
     mask: torch.Tensor,
+    apply_silu: bool = False,
 ):
     """
-    Wrapper around nvfp4_batched_quantize to match the behavior of
-    scaled_fp4_grouped_quant used for flashinfer grouped gemm.
+    Unified wrapper around nvfp4_batched_quantize and 
+    silu_and_mul_nvfp4_batched_quantize for flashinfer grouped GEMM.
 
     Args:
-        input_tensor (Tensor): Shape (l, m, k)
+        input_tensor (Tensor): 
+            - Shape (l, m, k) if apply_silu=False
+            - Shape (l, m, k*2) if apply_silu=True
         input_global_scale (Tensor): Shape (l,)
         mask (Tensor): Mask tensor, broadcastable
+        apply_silu (bool): If True, use silu_and_mul quantization
 
     Returns:
-        output (Tensor): Quantized tensor, logical shape (m, k // 2, l)
+        output (Tensor): Quantized tensor, logical shape (m, k//2, l)
         output_scales (Tensor): Blockscale tensor, logical shape (32, 4, rm, 4, rk, l)
     """
     device = input_tensor.device
-    l, m, k = input_tensor.shape
+    l, m, k_like = input_tensor.shape
+
+    if apply_silu:
+        # input_tensor is (l, m, k//2)
+        k = k_like // 2
+    else:
+        # input_tensor is (l, m, k)
+        k = k_like
+
     sf_vec_size = 16
     assert k % sf_vec_size == 0, f"k must be multiple of 16, but got {k}."
 
     scale_k = k // sf_vec_size
     padded_k = (scale_k + (4 - 1)) // 4 * 4
-    padded_k_int32 = padded_k // 4
     padded_m = (m + (128 - 1)) // 128 * 128
 
-    # Core quantization: aq is (l, m, k // 2), aq_sf is (l, padded_m, padded_k_int32)
-    aq, aq_sf = nvfp4_batched_quantize(
-        input_tensor,
-        input_global_scale,
-        mask=mask,
-    )
+    # --- core quantization call ---
+    if apply_silu:
+        aq, aq_sf = silu_and_mul_nvfp4_batched_quantize(
+            input_tensor,
+            mask,
+            input_global_scale,
+        )
+    else:
+        aq, aq_sf = nvfp4_batched_quantize(
+            input_tensor,
+            input_global_scale,
+            mask=mask,
+        )
 
-    # Re-layout quantized tensor: physical (l, m, k//2) -> logical (m, k//2, l)
+    # --- re-layout quantized tensor ---
+    # physical (l, m, k//2) -> logical (m, k//2, l)
     output = aq.permute(1, 2, 0)
 
-    # Re-layout blockscales: physical (l, rm, rk, 32, 4, 4) -> logical (32, 4, rm, 4, rk, l)
+    # --- re-layout blockscales ---
+    # physical (l, rm, rk, 32, 4, 4) -> logical (32, 4, rm, 4, rk, l)
     output_scales = aq_sf.view(torch.float8_e4m3fn).view(
         l, padded_m // 128, padded_k // 4, 32, 4, 4
     )
     output_scales = output_scales.permute(3, 4, 1, 5, 2, 0)
 
     return output, output_scales
-
-
-
 
 def flashinfer_cutedsl_moe_masked(
     hidden_states: torch.Tensor,
@@ -237,13 +253,14 @@ def flashinfer_cutedsl_moe_masked(
     a2_global_scale: torch.Tensor,
     w2_blockscale: torch.Tensor,
     w2_alpha,
-    workspace,
     masked_m: torch.Tensor,
+    workspace: torch.Tensor,
     out: torch.Tensor,
 ):
     """
     Perform masked Mixture-of-Experts computation with FlashInfer's CuteDSL
     kernels.
+
     Args:
         hidden_states (torch.Tensor): [num_experts, m, k], bf16
         input_global_scale (torch.Tensor): (l,)
@@ -254,8 +271,9 @@ def flashinfer_cutedsl_moe_masked(
         a2_global_scale (torch.Tensor): (l,)
         w2_blockscale (torch.Tensor): blockscale factors, e4m3,
         w2_alpha (torch.Tensor): (l,)
-        workspace (torch.Tensor): workspace for the intermediate output
         masked_m (torch.Tensor): Masked dimension indices
+        workspace (torch.Tensor): For gateup_output
+
     Notes:
         - Assumes max(masked_m) <= m.
     """
@@ -307,27 +325,15 @@ def flashinfer_cutedsl_moe_masked(
     assert w2_alpha.shape == (
         num_experts,
     ), f"w2_alpha must be (l,), got {w2_alpha.shape}"
-    # print(f"masked_m: {masked_m}")
-    # print(f"global_scale: {input_global_scale}")
+
     aq, aq_sf = scaled_fp4_grouped_quant(
         hidden_states,
         input_global_scale,
-        masked_m
+        masked_m,
     )
-    print(f"after scaled_fp4_grouped_quant: {aq.shape}")
-    print(f"after scaled_fp4_grouped_quant: {aq_sf.shape}")
-    # aq, aq_sf = nvfp4_batched_quantize(
-    #     hidden_states,
-    #     input_global_scale,
-    #     mask=masked_m,
-    # )
-    # TODO(shuw@nvidia.com): make it workspace
-    # workspace = torch.empty(
-    #     (num_experts, m, n * 2), dtype=hidden_states.dtype, device=aq.device
-    # )
-    gateup_output = workspace.permute(1, 2, 0)  # requirement of kernel
+
+    workspace = workspace.permute(1, 2, 0)  # requirement of kernel
     sf_vec_size = 16
-    # print(aq_sf.dtype)
     assert aq_sf.dtype == torch.float8_e4m3fn
     assert aq.dtype == torch.uint8
     ab_dtype = "float4_e2m1fn"
@@ -336,30 +342,11 @@ def flashinfer_cutedsl_moe_masked(
     c_dtype = get_cute_dtype(hidden_states)
 
     # Gemm1
-    inputs = {
-        "aq": aq,
-        "aq_sf": aq_sf,
-        "w1": w1.permute(1, 2, 0),
-        "w1_blockscale": w1_blockscale,
-        "gateup_output": gateup_output,
-        "masked_m": masked_m,
-        "w1_alpha": w1_alpha.view(1, 1, num_experts),
-    }
-
-    # Print dtype and shape
-    for name, tensor in inputs.items():
-        try:
-            print(f"{name}: shape={tensor.shape}, dtype={tensor.dtype}")
-        except AttributeError:
-            print(f"{name}: not a tensor, type={type(tensor)}")
-
-    # Optional: print dtypes of scalar args
-    print(f"ab_dtype={ab_dtype}, sf_dtype={sf_dtype}, c_dtype={c_dtype}, sf_vec_size={sf_vec_size}, alpha_dtype={get_cute_dtype(w1_alpha)}")
 
     flashinfer_cutedsl_grouped_gemm_nt_masked(
         (aq, aq_sf),
         (w1.permute(1, 2, 0), w1_blockscale),
-        gateup_output,
+        workspace,
         masked_m,
         ab_dtype=ab_dtype,
         sf_dtype=sf_dtype,
@@ -370,27 +357,27 @@ def flashinfer_cutedsl_moe_masked(
     )  # in logical [m, n, l]
 
     # SILU and quantization
-    diq, diq_sf = silu_and_mul_nvfp4_batched_quantize(
-        gateup_output.permute(2, 0, 1),
-        masked_m,
+    diq, diq_sf = scaled_fp4_grouped_quant(
+        workspace.permute(2, 0, 1),
         a2_global_scale,
+        masked_m,
+        apply_silu=True,
     )
 
     # Gemm2
     # out = torch.empty_like(hidden_states)
-    out = out.permute(1, 2, 0) 
-    # flashinfer_cutedsl_grouped_gemm_nt_masked(
-    #     (diq, diq_sf),
-    #     (w2.permute(1, 2, 0), w2_blockscale),
-    #     out,  # requirement of kernel
-    #     masked_m,
-    #     ab_dtype=ab_dtype,
-    #     sf_dtype=sf_dtype,
-    #     c_dtype=c_dtype,
-    #     sf_vec_size=sf_vec_size,
-    #     alpha=w2_alpha.view(1, 1, num_experts),
-    #     alpha_dtype=get_cute_dtype(w2_alpha),
-    # )  # in logical [m, k, l]
-    out = out.permute(1, 2, 0)  # back to [l, m, k]
+    out = out.permute(1, 2, 0)  # requirement of kernel
+    flashinfer_cutedsl_grouped_gemm_nt_masked(
+        (diq, diq_sf),
+        (w2.permute(1, 2, 0), w2_blockscale),
+        out,
+        masked_m,
+        ab_dtype=ab_dtype,
+        sf_dtype=sf_dtype,
+        c_dtype=c_dtype,
+        sf_vec_size=sf_vec_size,
+        alpha=w2_alpha.view(1, 1, num_experts),
+        alpha_dtype=get_cute_dtype(w2_alpha),
+    )  # in logical [m, k, l]
+    out = out.permute(2, 0, 1)
     return
-    # return out.permute(2, 0, 1)
