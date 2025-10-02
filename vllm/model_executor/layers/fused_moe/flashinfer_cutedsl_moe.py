@@ -109,7 +109,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output_shape = aq.shape
         workspace_dtype = a.dtype
         E = aq.size(0)
-        workspace2 = (E, M, N)
+        workspace2 = (1,)#(E, M, N)
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
@@ -152,7 +152,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # high precision as hidden_states
         # gateup_output = _resize_cache(workspace13, (E, max_num_tokens, N_TIMES_2))
         
-        flashinfer_cutedsl_moe_masked(
+        out1=flashinfer_cutedsl_moe_masked(
             hidden_states=hidden_states,
             input_global_scale=self.a1_gscale,
             w1=w1,
@@ -162,10 +162,11 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
             a2_global_scale=self.a2_gscale,
             w2_blockscale=self.w2_scale,
             w2_alpha=self.g2_alphas,
-            workspace=workspace2,
+            #workspace=workspace2,
             masked_m=expert_num_tokens,
-            out=output,
+            #out=output,
         )
+        output.copy_(out1)
 
 def get_cute_dtype(input: torch.Tensor) -> str:
     if input.dtype == torch.bfloat16:
@@ -254,8 +255,8 @@ def flashinfer_cutedsl_moe_masked(
     w2_blockscale: torch.Tensor,
     w2_alpha,
     masked_m: torch.Tensor,
-    workspace: torch.Tensor,
-    out: torch.Tensor,
+    #workspace: torch.Tensor,
+    #out: torch.Tensor,
 ):
     """
     Perform masked Mixture-of-Experts computation with FlashInfer's CuteDSL
@@ -331,7 +332,11 @@ def flashinfer_cutedsl_moe_masked(
         input_global_scale,
         masked_m,
     )
+ #   print(f"masked_m:{masked_m}")
 
+    workspace = torch.zeros(
+        (num_experts, m, n * 2), dtype=hidden_states.dtype, device=aq.device
+    )
     workspace = workspace.permute(1, 2, 0)  # requirement of kernel
     sf_vec_size = 16
     assert aq_sf.dtype == torch.float8_e4m3fn
@@ -365,7 +370,7 @@ def flashinfer_cutedsl_moe_masked(
     )
 
     # Gemm2
-    # out = torch.empty_like(hidden_states)
+    out = torch.zeros_like(hidden_states)
     out = out.permute(1, 2, 0)  # requirement of kernel
     flashinfer_cutedsl_grouped_gemm_nt_masked(
         (diq, diq_sf),
@@ -379,5 +384,5 @@ def flashinfer_cutedsl_moe_masked(
         alpha=w2_alpha.view(1, 1, num_experts),
         alpha_dtype=get_cute_dtype(w2_alpha),
     )  # in logical [m, k, l]
-    out = out.permute(2, 0, 1)
-    return
+#    out = out.permute(2, 0, 1)
+    return out.permute(2,0,1)
