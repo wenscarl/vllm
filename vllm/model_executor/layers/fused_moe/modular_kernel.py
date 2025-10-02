@@ -921,8 +921,8 @@ class FusedMoEModularKernel(torch.nn.Module):
                  self.fused_experts.quant_config,
              )
         else:
-            print('yy'*100)
-            print(f"before prepare_async, a1 shape:{a1.shape}")
+            #print('yy'*100)
+            #print(f"before prepare_async, a1 shape:{a1.shape}")
             # Overlap shared expert compute with all2all dispatch.
             dbo_maybe_run_recv_hook()
             prepare_ret = self.prepare_finalize.prepare_async(
@@ -955,8 +955,8 @@ class FusedMoEModularKernel(torch.nn.Module):
 
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = receiver()
-            print('modular_kernel.py'*100)
-            print(f"after receiver(), a1q shape:{a1q.shape}")
+            #print('modular_kernel.py'*100)
+            #print(f"after receiver(), a1q shape:{a1q.shape}")
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids

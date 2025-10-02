@@ -118,7 +118,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "BF16 dispatch requires input to be in BF16")
             x_scales = None
             x = x.view((num_experts, -1, hidden_dim))
-            print(f"after deepepll: x.shape = {x.shape}")
+            #print(f"after deepepll: x.shape = {x.shape}")
 
         return x, x_scales
 
@@ -190,7 +190,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
-        print(f"deepll: receiver_ expert_x:{expert_x.shape}")
+        #print(f"deepll: receiver_ expert_x:{expert_x.shape}")
         return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
     def prepare(
