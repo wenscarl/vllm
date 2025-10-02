@@ -936,7 +936,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             )
             import traceback
             # traceback.print_stack()
-            print(f"after prepare_async, prepare_ret:{prepare_ret}")
+            #print(f"after prepare_async, prepare_ret:{prepare_ret}")
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
             # receiver (see finalize_async docstring)
