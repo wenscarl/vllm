@@ -601,6 +601,8 @@ def test_grouped_gemm_nt_masked(
     # Note: just to compare the masked position due to cutedsl may write nan
     # into unmasked position.
     for i in range(num_experts):
+        print(f"fi:{out_flashinfer.permute(2, 0, 1)[i, : masked_m[i]]}")
+        print(f"ref:{out_ref.to(out_flashinfer.device)[i, : masked_m[i]]}")
         torch.testing.assert_close(
             out_flashinfer.permute(2, 0, 1)[i, : masked_m[i]],
             out_ref.to(out_flashinfer.device)[i, : masked_m[i]],
@@ -610,5 +612,5 @@ def test_grouped_gemm_nt_masked(
 
 
 if __name__ == "__main__":
-    test_flashinfer_cutedsl_moe_masked(16, 128, 512, 4)
+    #test_flashinfer_cutedsl_moe_masked(16, 128, 512, 4)
     test_grouped_gemm_nt_masked(16, 128, 512, 4)

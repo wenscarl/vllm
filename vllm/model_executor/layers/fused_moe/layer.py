@@ -1409,7 +1409,7 @@ class FusedMoE(CustomOp):
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)        
         is_modeloptnvfp4 = "ModelOpt" in quant_method_name
-        is_input_scale = "input_scale" in weight_name:        
+        is_input_scale = "input_scale" in weight_name  
         if expert_id == -1 and not (is_modeloptnvfp4 and is_input_scale):
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
