@@ -162,10 +162,11 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
             a2_global_scale=self.a2_gscale,
             w2_blockscale=self.w2_scale,
             w2_alpha=self.g2_alphas,
-            workspace=workspace2,
             masked_m=expert_num_tokens,
+            workspace=workspace2,
             out=output,
         )
+        #output.copy_(o1)
 
 def get_cute_dtype(input: torch.Tensor) -> str:
     if input.dtype == torch.bfloat16:
@@ -332,6 +333,9 @@ def flashinfer_cutedsl_moe_masked(
         masked_m,
     )
 
+    #workspace = torch.zeros(
+    #    (num_experts, m, n * 2), dtype=hidden_states.dtype, device=aq.device
+    #)
     workspace = workspace.permute(1, 2, 0)  # requirement of kernel
     sf_vec_size = 16
     assert aq_sf.dtype == torch.float8_e4m3fn
@@ -355,6 +359,9 @@ def flashinfer_cutedsl_moe_masked(
         alpha=w1_alpha.view(1, 1, num_experts),
         alpha_dtype=get_cute_dtype(w1_alpha),
     )  # in logical [m, n, l]
+#    for i in range(num_experts):
+#        if masked_m[i] == 0:
+#            workspace[:,:,i] = 0
 
     # SILU and quantization
     diq, diq_sf = scaled_fp4_grouped_quant(
@@ -365,7 +372,7 @@ def flashinfer_cutedsl_moe_masked(
     )
 
     # Gemm2
-    # out = torch.empty_like(hidden_states)
+    #out = torch.zeros_like(hidden_states)
     out = out.permute(1, 2, 0)  # requirement of kernel
     flashinfer_cutedsl_grouped_gemm_nt_masked(
         (diq, diq_sf),
@@ -379,5 +386,9 @@ def flashinfer_cutedsl_moe_masked(
         alpha=w2_alpha.view(1, 1, num_experts),
         alpha_dtype=get_cute_dtype(w2_alpha),
     )  # in logical [m, k, l]
+    #for i in range(num_experts):
+    #    if masked_m[i] == 0:
+    #        out[:,:,i] = 0
+    #return out.permute(2,0,1)
     out = out.permute(2, 0, 1)
     return

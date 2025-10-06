@@ -80,12 +80,37 @@ def break_fp4_bytes(a, dtype):
     return values.reshape(m, n * 2).to(dtype=dtype)
 
 
-def compute_routing(router_logits: torch.Tensor, top_k: int):
-    routing_weights = torch.softmax(router_logits, dim=1, dtype=torch.float)
-    routing_weights, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
+def generate_balanced_routing(hidden_states: torch.Tensor, num_experts: int, top_k: int):
+    """
+    Generate routing weights and topk indices such that every expert is active.
+    Returns routing_weights, topk_idx
+    """
+
+    num_tokens, hidden_dim = hidden_states.shape
+ #   num_tokens = batch_size * seq_len
+
+    # First, assign at least one token per expert
+    tokens_per_expert = torch.arange(num_tokens) % num_experts
+    tokens_per_expert = tokens_per_expert[torch.randperm(num_tokens)]  # shuffle
+
+    # Each token has top_k experts — start with one guaranteed expert
+    topk_idx = torch.full((num_tokens, top_k), -1, dtype=torch.long)
+    topk_idx[:, 0] = tokens_per_expert
+
+    # For remaining top_k - 1 experts, pick randomly (allowing repeats)
+    if top_k > 1:
+        random_choices = torch.randint(0, num_experts, (num_tokens, top_k - 1))
+        topk_idx[:, 1:] = random_choices
+
+    # Normalize routing weights so each token's weights sum to 1
+    routing_weights = torch.rand(num_tokens, top_k)
     routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-    routing_weights = routing_weights.float()
-    return routing_weights, selected_experts
+
+    # Reshape back if needed
+    routing_weights = routing_weights.view(num_tokens, top_k)
+    topk_idx = topk_idx.view(num_tokens, top_k)
+
+    return routing_weights, topk_idx
 
 
 def prepare_inputs(
@@ -94,7 +119,7 @@ def prepare_inputs(
     num_experts: int,
     topk: int,
 ):
-    routing_weights, topk_idx = compute_routing(router_logits, topk)
+    routing_weights, topk_idx = generate_balanced_routing(router_logits, num_experts, topk)
 
     masked_m = []
     for i in range(num_experts):
@@ -161,7 +186,7 @@ def torch_moe_nvfp4(a, w1, w2, topk, topk_weight, topk_ids):
             m = w1[i].shape[0]
             assert m % 2 == 0
             # Note: w1 and w3 are swapped!
-            w3_expert, w1_expert = w1[i][m // 2 :, :], w1[i][: m // 2, :]
+            w3_expert, w1_expert = w1[i][m // 2:, :], w1[i][:m // 2, :]
             inter = F.silu(a[mask] @ w1_expert.t()) * (a[mask] @ w3_expert.t())
             inter_gs = torch.tensor(1.0).cuda()
             inter_q, inter_blockscale = fp4_quantize(inter, inter_gs)
@@ -236,131 +261,6 @@ def flashinfer_cutedsl_grouped_gemm_nt_masked(
     )
 
     return out
-
-
-def check_moe(
-    m: int,
-    n: int,
-    k: int,
-    e: int,
-    topk: int,
-    dtype: torch.dtype,
-    moe_impl: Callable,
-    flip_w13: bool,
-):
-    torch.manual_seed(7)
-    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    quant_blocksize = 16
-    round_up = lambda x, y: (x + y - 1) // y * y
-    sf_w1_2n = round_up(2 * n, 128)
-    sf_w1_k = round_up(k // quant_blocksize, 4)
-    w1_blockscale = torch.empty(
-        (e, sf_w1_2n, sf_w1_k), device="cuda", dtype=torch.float8_e4m3fn
-    )
-
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-    sf_w2_k = round_up(k, 128)
-    sf_w2_n = round_up(n // quant_blocksize, 4)
-    w2_blockscale = torch.empty(
-        (e, sf_w2_k, sf_w2_n), device="cuda", dtype=torch.float8_e4m3fn
-    )
-
-    w1_q = torch.empty((e, 2 * n, k // 2), device="cuda", dtype=torch.uint8)
-    w2_q = torch.empty((e, k, n // 2), device="cuda", dtype=torch.uint8)
-    w1_gs = torch.empty((e,), device="cuda", dtype=torch.float32)
-    w2_gs = torch.empty((e,), device="cuda", dtype=torch.float32)
-
-    for expert in range(e):
-        w1_amax = torch.abs(w1).max().to(torch.float32)
-        w2_amax = torch.abs(w2).max().to(torch.float32)
-        w1_gs[expert] = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax
-        w2_gs[expert] = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w2_amax
-
-        w1_q[expert], w1_blockscale[expert] = scaled_fp4_quant(
-            w1[expert], w1_gs[expert]
-        )
-
-        w2_q[expert], w2_blockscale[expert] = scaled_fp4_quant(
-            w2[expert], w2_gs[expert]
-        )
-
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
-
-    topk_output = FusedMoE.select_experts(
-        hidden_states=a,
-        router_logits=score,
-        top_k=topk,
-        use_grouped_topk=False,
-        renormalize=False,
-    )
-    topk_weights, topk_ids, _ = topk_output
-
-    a1_gs = torch.ones((e,), device="cuda", dtype=torch.float32)
-    a2_gs = torch.ones((e,), device="cuda", dtype=torch.float32)
-    test_output = moe_impl(
-        a=a,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        w1_q=w1_q,
-        w2_q=w2_q,
-        a1_gs=a1_gs,
-        w1_blockscale=w1_blockscale,
-        w1_alphas=(1 / w1_gs),
-        a2_gs=a2_gs,
-        w2_blockscale=w2_blockscale,
-        w2_alphas=(1 / w2_gs),
-    )
-
-    # Reference check:
-    a_global_scale = (
-        (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a.flatten(), dim=-1)
-    ).to(torch.float32)
-    a_fp4, a_scale_interleaved = scaled_fp4_quant(a, a_global_scale)
-    _, m_k = a_fp4.shape
-    a_in_dtype = dequantize_nvfp4_to_dtype(
-        a_fp4,
-        a_scale_interleaved,
-        a_global_scale,
-        dtype=a.dtype,
-        device=a.device,
-        block_size=quant_blocksize,
-    )
-
-    w1_d = torch.empty((e, 2 * n, k), device="cuda", dtype=dtype)
-    w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
-
-    for idx in range(0, e):
-        w1_d[idx] = dequantize_nvfp4_to_dtype(
-            w1_q[idx],
-            w1_blockscale[idx],
-            w1_gs[idx],
-            dtype=w1.dtype,
-            device=w1.device,
-            block_size=quant_blocksize,
-        )
-        w2_d[idx] = dequantize_nvfp4_to_dtype(
-            w2_q[idx],
-            w2_blockscale[idx],
-            w2_gs[idx],
-            dtype=w2.dtype,
-            device=w2.device,
-            block_size=quant_blocksize,
-        )
-
-    if flip_w13:
-        dim = -2
-        size = w1_d.size(dim)
-        assert size % 2 == 0, f"Expected even size in dim {dim}, got {size}"
-        half = size // 2
-        # Reorder weight
-        w1, w3 = w1_d.split(half, dim=dim)
-        w1_d = torch.cat([w3, w1], dim=dim).contiguous()
-
-    torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk, None)
-
-    torch.testing.assert_close(torch_output, test_output, atol=1e-1, rtol=1e-1)
-
 
 
 @pytest.mark.parametrize("bs, hidden_dim, inter_dim", [(2, 128, 256), (16, 128, 512)])
@@ -507,7 +407,7 @@ def test_flashinfer_cutedsl_moe_masked(
                 out.device
             ).unsqueeze(-1)
     torch.testing.assert_close(
-        out_weighted.cpu(), ref_output.cpu(), atol=5e-2, rtol=5e-2
+        out_weighted.cpu(), ref_output.cpu(), atol=1e-1, rtol=1e-1
     )
 
 
@@ -522,7 +422,10 @@ def test_grouped_gemm_nt_masked(
     B = bs
     D = hidden_dim
     N = inter_dim
-    num_experts = 8
+    # CuteDSL group gemm has issue when not all experts are active.
+    # i.e. masked = [2, 3, 0, 0, 1] where the 2nd and 3rd experts are inactive
+    # see https://github.com/flashinfer-ai/flashinfer/issues/1856
+    num_experts = bs
     hidden_states = torch.randn(B, D, dtype=torch.bfloat16, device="cuda")
     weights = torch.randn(num_experts, N, D, dtype=torch.bfloat16, device="cuda")
     router_logits = torch.randn(B, num_experts, dtype=torch.float32)

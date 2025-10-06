@@ -1291,7 +1291,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         gemm1_weight = layer.w13_weight.data
         gemm1_weight_scale = layer.w13_weight_scale.data
 
-        if self.allow_flashinfer:
+        if self.allow_flashinfer and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             gemm1_weight, gemm1_weight_scale = reorder_w1w3_to_w3w1(
                 gemm1_weight, gemm1_weight_scale, dim=-2)
 
