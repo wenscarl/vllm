@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -21,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     is_valid_flashinfer_cutlass_fused_moe,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -94,8 +92,8 @@ class ModelOptFp8Config(QuantizationConfig):
     def __init__(
         self,
         is_checkpoint_fp8_serialized: bool = False,
-        kv_cache_quant_method: str | None = None,
-        exclude_modules: list[str] | None = None,
+        kv_cache_quant_method: Optional[str] = None,
+        exclude_modules: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
@@ -130,7 +128,7 @@ class ModelOptFp8Config(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> QuantizationMethods | None:
+    ) -> Optional[QuantizationMethods]:
         """Detect if this ModelOpt config should be used based on
         quantization config."""
 
@@ -321,7 +319,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply(
             input=x,
@@ -353,7 +351,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
 
         self.cutlass_fp8_supported = cutlass_fp8_supported()
-        self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
+        self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
         if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
@@ -362,7 +360,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(
         self,
-    ) -> mk.FusedMoEPrepareAndFinalize | None:
+    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         # TRT LLM not supported with all2all yet.
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
@@ -543,7 +541,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    ) -> Optional[FusedMoEQuantConfig]:
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
 
@@ -563,21 +561,21 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
         global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
+        e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet."
@@ -676,7 +674,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
     def __init__(
         self,
         is_checkpoint_nvfp4_serialized: bool,
-        kv_cache_quant_algo: str | None,
+        kv_cache_quant_algo: Optional[str],
         exclude_modules: list[str],
         group_size: int = 16,
     ) -> None:
@@ -715,7 +713,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> QuantizationMethods | None:
+    ) -> Optional[QuantizationMethods]:
         """Detect if this ModelOpt FP4 config should be used based on
         quantization config."""
         if hf_quant_cfg is None:
@@ -908,7 +906,7 @@ class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
     Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
-    def __init__(self, quant_config: ModelOptFp8Config | ModelOptNvFp4Config):
+    def __init__(self, quant_config: Union[ModelOptFp8Config, ModelOptNvFp4Config]):
         super().__init__(quant_config)
 
 
@@ -1073,7 +1071,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.backend == "marlin":
             return apply_fp4_marlin_linear(
@@ -1164,7 +1162,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 " for ModelOptNvFp4FusedMoE."
             )
 
-    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         if self.use_marlin or (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
@@ -1253,7 +1251,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_weight", w2_weight)
-
+        print("in creating weights:")
+        print(f"num_experts: {num_experts}")
         w13_weight_scale = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
@@ -1443,7 +1442,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         gemm1_weight = layer.w13_weight.data
         gemm1_weight_scale = layer.w13_weight_scale.data
 
-        if self.allow_flashinfer:
+        if self.allow_flashinfer and \
+            self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             gemm1_weight, gemm1_weight_scale = reorder_w1w3_to_w3w1(
                 gemm1_weight, gemm1_weight_scale, dim=-2
             )
@@ -1465,6 +1465,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         # Common processing for input scales and alphas
         w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(torch.float32)
+        # w13_input_scale = layer.w13_input_scale.max().to(torch.float32).expand(layer.num_experts)
         layer.g1_alphas = Parameter(
             (w13_input_scale * w13_weight_scale_2).to(torch.float32),
             requires_grad=False,
@@ -1476,14 +1477,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         # GEMM 2 processing
+        # w2_input_scale = (
+        #     layer.w2_input_scale.max().to(torch.float32).expand(layer.num_experts)
+        # )
+        w2_input_scale = layer.w2_input_scale
         layer.g2_alphas = Parameter(
-            (layer.w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
+            (w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
             requires_grad=False,
         )
 
         # This is for quantization, so we need to invert it.
         layer.w2_input_scale_quant = Parameter(
-            (1 / layer.w2_input_scale).to(torch.float32), requires_grad=False
+            (1 / w2_input_scale).to(torch.float32), requires_grad=False
         )
 
         # TensorRT-LLM specific processing
@@ -1548,10 +1553,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             assert layer.w13_weight_scale.dtype == torch.float8_e4m3fn, (
                 "Weight Blockscale must be represented as FP8-E4M3"
             )
-            w13_blockscale_swizzled = swizzle_blockscale(layer.w13_weight_scale)
-            layer.w13_weight_scale = Parameter(
-                w13_blockscale_swizzled, requires_grad=False
-            )
+            print('xxx'*100)
+            # w13_blockscale_swizzled = swizzle_blockscale(layer.w13_weight_scale)
+            # layer.w13_weight_scale = Parameter(
+            #     w13_blockscale_swizzled, requires_grad=False
+            # )
 
             assert layer.w2_weight_scale.shape[2] % 16 == 0, (
                 "Expected weight_scale.dim(1) to be divisible by 16"
@@ -1567,7 +1573,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    ) -> Optional[FusedMoEQuantConfig]:
         if (
             self.use_marlin
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
@@ -1591,21 +1597,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
         global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
+        e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
@@ -1702,7 +1708,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         #
         if self.use_marlin:
             assert self.fused_experts is None
-            return fused_marlin_moe(
+            return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -1723,15 +1729,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
 
         elif self.fused_experts is not None:
-            assert (
-                self.allow_flashinfer
-                and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-            )
+            assert self.allow_flashinfer
+            assert self.flashinfer_moe_backend in \
+                (FlashinferMoeBackend.CUTLASS,)#, FlashinferMoeBackend.CUTEDSL)
 
             assert is_valid_flashinfer_cutlass_fused_moe(
                 x, layer.w13_weight, layer.w2_weight
             ), "Flashinfer CUTLASS Fused MoE not applicable!"
-
+            # print('gg'*100, x.dtype, layer.w13_weight.dtype)
             return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -1771,15 +1776,31 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
             # only (no EP).
             from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
-
+            num_experts = layer.w13_weight.shape[0]
             assert self.moe_quant_config is not None
-            return cutlass_moe_fp4(
+            w13_blockscale_swizzled_cutlass = swizzle_blockscale(layer.w13_weight_scale)
+
+            quant_config_cutlass = FusedMoEQuantConfig.make(
+                quant_dtype=self.moe_quant_config.quant_dtype,  # skip quantization in prepare/finalize
+                per_act_token_quant=self.moe_quant_config.per_act_token_quant,
+                per_out_ch_quant=self.moe_quant_config.per_out_ch_quant,
+                block_shape=self.moe_quant_config.block_shape,
+                g1_alphas=self.moe_quant_config.g1_alphas,
+                g2_alphas=self.moe_quant_config.g2_alphas,
+                # a1_gscale=self.moe_quant_config.a1_gscale,
+                # a2_gscale=self.moe_quant_config.a2_gscale,
+                a1_gscale=self.moe_quant_config.a1_gscale,#[0].expand((num_experts,)).contiguous(),
+                a2_gscale=self.moe_quant_config.a2_gscale,#[0].expand((num_experts,)).contiguous(),
+                w1_scale=w13_blockscale_swizzled_cutlass,
+                w2_scale=self.moe_quant_config.w2_scale,
+            )
+            normal_cutlass = cutlass_moe_fp4(
                 a=x,
                 w1_fp4=layer.w13_weight,
                 w2_fp4=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                quant_config=self.moe_quant_config,
+                quant_config=quant_config_cutlass,
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 # TODO: derive from arguments
@@ -1788,3 +1809,50 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 k=x.shape[1],
                 e=layer.w13_weight.shape[0],
             )
+            # return normal_cutlass
+
+#########################
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+                flashinfer_cutlass_moe_fp4,
+            )
+
+            assert self.moe_quant_config is not None
+            gemm1_weight, gemm1_weight_scale_linear = reorder_w1w3_to_w3w1(
+                layer.w13_weight, layer.w13_weight_scale, dim=-2
+            )
+            
+            gemm1_weight_scale_swizzled = swizzle_blockscale(gemm1_weight_scale_linear)
+            # print(self.moe_quant_config.a1_gscale.shape)
+
+            quant_config = FusedMoEQuantConfig.make(
+                quant_dtype=self.moe_quant_config.quant_dtype,  # skip quantization in prepare/finalize
+                per_act_token_quant=self.moe_quant_config.per_act_token_quant,
+                per_out_ch_quant=self.moe_quant_config.per_out_ch_quant,
+                block_shape=self.moe_quant_config.block_shape,
+                g1_alphas=self.moe_quant_config.g1_alphas,
+                g2_alphas=self.moe_quant_config.g2_alphas,
+                a1_gscale=self.moe_quant_config.a1_gscale,#[0].expand((num_experts,)).contiguous(),
+                a2_gscale=self.moe_quant_config.a2_gscale,#[0].expand((num_experts,)).contiguous(),
+                w1_scale=gemm1_weight_scale_swizzled,
+                w2_scale=self.moe_quant_config.w2_scale,
+            )
+            # print(gemm1_weight.dtype)
+            # print(gemm1_weight_scale_swizzled.dtype)
+            fi_result = flashinfer_cutlass_moe_fp4(
+                hidden_states=x,
+                w1=gemm1_weight, #reordered weight
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                quant_config=quant_config,
+                inplace=False,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+            # return fi_result
+            # print(f"fi_result: {fi_result}")
+            # print(f"normal_cutlass: {normal_cutlass}")
+            # torch.testing.assert_close(fi_result, normal_cutlass, atol=1e-2, rtol=1e-2)
+            return fi_result
