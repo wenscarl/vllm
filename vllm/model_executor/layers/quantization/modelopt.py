@@ -924,7 +924,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
 
-        if envs.VLLM_USE_TRTLLM_FP4_GEMM:
+        if False:#envs.VLLM_USE_TRTLLM_FP4_GEMM:
             assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
             self.backend = "flashinfer-trtllm"
         elif has_flashinfer():
@@ -1794,21 +1794,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 w1_scale=w13_blockscale_swizzled_cutlass,
                 w2_scale=self.moe_quant_config.w2_scale,
             )
-            normal_cutlass = cutlass_moe_fp4(
-                a=x,
-                w1_fp4=layer.w13_weight,
-                w2_fp4=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                quant_config=quant_config_cutlass,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                # TODO: derive from arguments
-                m=x.shape[0],
-                n=layer.w2_weight.shape[2] * 2,
-                k=x.shape[1],
-                e=layer.w13_weight.shape[0],
-            )
+            # normal_cutlass = cutlass_moe_fp4(
+            #     a=x,
+            #     w1_fp4=layer.w13_weight,
+            #     w2_fp4=layer.w2_weight,
+            #     topk_weights=topk_weights,
+            #     topk_ids=topk_ids,
+            #     quant_config=quant_config_cutlass,
+            #     expert_map=expert_map,
+            #     apply_router_weight_on_input=apply_router_weight_on_input,
+            #     # TODO: derive from arguments
+            #     m=x.shape[0],
+            #     n=layer.w2_weight.shape[2] * 2,
+            #     k=x.shape[1],
+            #     e=layer.w13_weight.shape[0],
+            # )
             # return normal_cutlass
 
 #########################
@@ -1838,21 +1838,49 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
             # print(gemm1_weight.dtype)
             # print(gemm1_weight_scale_swizzled.dtype)
-            fi_result = flashinfer_cutlass_moe_fp4(
-                hidden_states=x,
-                w1=gemm1_weight, #reordered weight
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                quant_config=quant_config,
-                inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+            # from vllm import _custom_ops as ops
+            # a1_gscale = self.moe_quant_config.a1_gscale
+            # fi_result = flashinfer_cutlass_moe_fp4(
+            #     hidden_states=x,
+            #     w1=gemm1_weight, #reordered weight
+            #     w2=layer.w2_weight,
+            #     topk_weights=topk_weights,
+            #     topk_ids=topk_ids,
+            #     quant_config=quant_config,
+            #     inplace=False,
+            #     activation=activation,
+            #     global_num_experts=global_num_experts,
+            #     expert_map=expert_map,
+            #     apply_router_weight_on_input=apply_router_weight_on_input,
+            # )
+            import flashinfer.fused_moe as fused_moe
+            a1_gs = self.moe_quant_config.a1_gscale
+            a2_gs = self.moe_quant_config.a2_gscale
+            # flash_output = torch.empty_like(normal_cutlass)
+            quant_scales = [
+                a1_gs,
+                gemm1_weight_scale_swizzled.view(torch.int32),
+                self.moe_quant_config.g1_alphas,
+                a2_gs,
+                self.moe_quant_config.w2_scale.view(torch.int32),
+                self.moe_quant_config.g2_alphas,
+            ]
+            flash_output = fused_moe.cutlass_fused_moe(
+                x,
+                topk_ids.to(torch.int),
+                topk_weights,
+                gemm1_weight.view(torch.long),
+                layer.w2_weight.view(torch.long),
+                x.dtype,
+                quant_scales=quant_scales,
+                input_sf=self.moe_quant_config.a1_gscale,
+                # output=flash_output,
             )
+            # torch.testing.assert_close(flash_output[0], normal_cutlass, atol=1e-2, rtol=1e-2)
+            return flash_output[0]
+
             # return fi_result
             # print(f"fi_result: {fi_result}")
             # print(f"normal_cutlass: {normal_cutlass}")
             # torch.testing.assert_close(fi_result, normal_cutlass, atol=1e-2, rtol=1e-2)
-            return fi_result
+            # return fi_result
